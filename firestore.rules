@@ -1,0 +1,153 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isSelf(uid) {
+      return signedIn() && request.auth.uid == uid;
+    }
+
+    function familyPath(familyId) {
+      return /databases/$(database)/documents/families/$(familyId);
+    }
+
+    function memberPath(familyId, uid) {
+      return /databases/$(database)/documents/families/$(familyId)/members/$(uid);
+    }
+
+    function isMember(familyId) {
+      return signedIn() && exists(memberPath(familyId, request.auth.uid));
+    }
+
+    function memberData(familyId) {
+      return get(memberPath(familyId, request.auth.uid)).data;
+    }
+
+    function isParent(familyId) {
+      return isMember(familyId)
+        && memberData(familyId).role in ["parent", "guardian", "owner"];
+    }
+
+    match /users/{uid} {
+      allow create: if isSelf(uid) && request.resource.data.uid == request.auth.uid;
+      allow read, update: if isSelf(uid);
+      allow delete: if false;
+    }
+
+    match /families/{familyId} {
+      allow create: if signedIn() && request.resource.data.created_by == request.auth.uid;
+      allow read: if isMember(familyId);
+      allow update: if isParent(familyId);
+      allow delete: if false;
+
+      match /members/{uid} {
+        allow read: if isMember(familyId);
+        allow create: if (
+          isSelf(uid)
+          && existsAfter(familyPath(familyId))
+          && getAfter(familyPath(familyId)).data.created_by == request.auth.uid
+          && request.resource.data.role in ["parent", "guardian", "owner"]
+        ) || isParent(familyId);
+        allow update: if isParent(familyId)
+          || (isSelf(uid)
+            && request.resource.data.diff(resource.data).affectedKeys()
+              .hasOnly(["display_name", "avatar_url", "default_navigation_app", "updated_at"]));
+        allow delete: if isParent(familyId) && request.auth.uid != uid;
+      }
+
+      match /places/{docId} {
+        allow read: if isMember(familyId);
+        allow create, update, delete: if isParent(familyId);
+      }
+
+      match /events/{docId} {
+        allow read: if isMember(familyId);
+        allow create, update, delete: if isParent(familyId);
+      }
+
+      match /route_stops/{docId} {
+        allow read: if isMember(familyId);
+        allow create, update, delete: if isParent(familyId);
+      }
+
+      match /homework_tasks/{docId} {
+        allow read: if isMember(familyId);
+        allow create, update, delete: if isParent(familyId);
+      }
+
+      match /homework_items/{docId} {
+        allow read: if isMember(familyId);
+        allow create, delete: if isParent(familyId);
+        allow update: if isParent(familyId)
+          || (isMember(familyId)
+            && request.resource.data.diff(resource.data).affectedKeys()
+              .hasOnly(["is_done", "completed_by", "completed_at", "updated_at"]));
+      }
+
+      match /homework_attachments/{docId} {
+        allow read: if isMember(familyId);
+        allow create: if isMember(familyId)
+          && request.resource.data.uploaded_by == request.auth.uid;
+        allow update: if false;
+        allow delete: if isParent(familyId) || resource.data.uploaded_by == request.auth.uid;
+      }
+
+      match /requests/{docId} {
+        allow read: if isMember(familyId);
+        allow create: if isMember(familyId)
+          && (!('requester_id' in request.resource.data) || request.resource.data.requester_id == request.auth.uid || isParent(familyId));
+        allow update, delete: if isParent(familyId);
+      }
+
+      match /payments/{docId} {
+        allow read: if isMember(familyId);
+        allow create, update, delete: if isParent(familyId);
+      }
+
+      match /learning_records/{docId} {
+        allow read: if isMember(familyId);
+        allow create, update, delete: if isParent(familyId);
+      }
+
+      match /learning_summaries/{docId} {
+        allow read: if isMember(familyId);
+        allow create, update, delete: if isParent(familyId);
+      }
+
+      match /meal_plans/{docId} {
+        allow read: if isMember(familyId);
+        allow create, update, delete: if isParent(familyId);
+      }
+
+      match /shopping_items/{docId} {
+        allow read: if isMember(familyId);
+        allow create, update, delete: if isParent(familyId);
+      }
+
+
+
+      match /route_departure_plans/{docId} {
+        allow read: if isMember(familyId);
+        allow create, update, delete: if isParent(familyId);
+      }
+
+      match /route_departure_legs/{docId} {
+        allow read: if isMember(familyId);
+        allow create, update, delete: if isParent(familyId);
+      }
+
+      match /parent_handoff_messages/{docId} {
+        allow read: if isMember(familyId);
+        allow create, update, delete: if isParent(familyId);
+      }
+
+      match /ai_logs/{docId} {
+        allow read: if isParent(familyId);
+        allow create: if isMember(familyId);
+        allow update, delete: if false;
+      }
+    }
+  }
+}

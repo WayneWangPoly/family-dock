@@ -1,0 +1,29 @@
+{
+  "indexes": [
+    {
+      "collectionGroup": "route_stops",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "stop_date", "order": "ASCENDING" },
+        { "fieldPath": "stop_order", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "route_departure_legs",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "plan_id", "order": "ASCENDING" },
+        { "fieldPath": "leg_order", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "parent_handoff_messages",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "plan_id", "order": "ASCENDING" },
+        { "fieldPath": "created_at", "order": "DESCENDING" }
+      ]
+    }
+  ],
+  "fieldOverrides": []
+}

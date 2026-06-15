@@ -1,0 +1,19 @@
+{
+  "name": "Family Dock",
+  "short_name": "Family Dock",
+  "description": "Mobile-first family schedule, homework, route and notification dock.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f6f1e8",
+  "theme_color": "#31535c",
+  "orientation": "portrait",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
