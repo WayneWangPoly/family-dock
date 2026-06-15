@@ -1,16 +1,20 @@
-#!/usr/bin/env bash
-set -euo pipefail
+$ErrorActionPreference = "Stop"
 
 # Run from the root of WayneWangPoly/family-dock
-if [ ! -f package.json ] || [ ! -d src ]; then
-  echo "Run this script from the family-dock repository root." >&2
+if (!(Test-Path "package.json") -or !(Test-Path "src")) {
+  Write-Error "Run this script from the family-dock repository root. Example: cd C:\path\to\family-dock"
   exit 1
-fi
+}
 
-rm -rf supabase
-rm -f src/lib/supabaseClient.ts
+if (Test-Path "supabase") {
+  Remove-Item "supabase" -Recurse -Force
+}
 
-cat > .env.example <<'ENV'
+if (Test-Path "src/lib/supabaseClient.ts") {
+  Remove-Item "src/lib/supabaseClient.ts" -Force
+}
+
+@'
 # Copy this file to .env.local and fill it with your Firebase Web App config.
 # Firebase Console -> Project settings -> General -> Your apps -> Web app config
 
@@ -23,9 +27,9 @@ VITE_FIREBASE_APP_ID=YOUR_FIREBASE_APP_ID
 
 # Optional integrations
 VITE_GOOGLE_MAPS_API_KEY=
-ENV
+'@ | Set-Content -Path ".env.example" -Encoding UTF8
 
-cat > README.md <<'README'
+@'
 # Family Dock
 
 Family Dock is a Firebase-backed family coordination app.
@@ -65,9 +69,9 @@ Or deploy hosting only:
 ```bash
 firebase deploy --only hosting
 ```
-README
+'@ | Set-Content -Path "README.md" -Encoding UTF8
 
-cat > src/lib/memberAccounts.ts <<'TS'
+@'
 import { httpsCallable } from "firebase/functions";
 import { firebaseFunctions } from "./firebaseClient";
 
@@ -111,9 +115,9 @@ export function generateTemporaryPassword() {
   password += String(Math.floor(Math.random() * 90) + 10);
   return password;
 }
-TS
+'@ | Set-Content -Path "src/lib/memberAccounts.ts" -Encoding UTF8
 
-cat > src/lib/accountActions.ts <<'TS'
+@'
 import { httpsCallable } from "firebase/functions";
 import { firebaseFunctions } from "./firebaseClient";
 
@@ -137,9 +141,9 @@ export async function runMemberAccountAction(
   });
   return result.data;
 }
-TS
+'@ | Set-Content -Path "src/lib/accountActions.ts" -Encoding UTF8
 
-cat > src/lib/productionHardening.ts <<'TS'
+@'
 import type { FamilyData } from "./familyDataTypes";
 
 export type ProductionCheckSeverity = "pass" | "info" | "warning" | "fail";
@@ -378,14 +382,14 @@ export function buildDiagnosticText(args: {
       `[${item.severity.toUpperCase()}] ${item.category} / ${item.title}`,
       item.message,
       item.recommendation ? `Recommendation: ${item.recommendation}` : "",
-    ].filter(Boolean).join("\n")),
+    ].filter(Boolean).join("`n")),
     "",
     "Recent exports",
     ...(args.exportLogs ?? [])
       .slice(0, 5)
       .map((log) => `${log.created_at} · ${log.file_name ?? "export"} · ${JSON.stringify(log.table_counts)}`),
   ].filter(Boolean);
-  return lines.join("\n\n");
+  return lines.join("`n`n");
 }
 
 export function productionChecklistItems() {
@@ -403,11 +407,23 @@ export function productionChecklistItems() {
     "Check Firestore and Storage rules before inviting external testers.",
   ];
 }
-TS
+'@ | Set-Content -Path "src/lib/productionHardening.ts" -Encoding UTF8
 
+Write-Host "Removing Supabase npm dependencies..."
 npm uninstall @supabase/supabase-js supabase
+
+Write-Host "Refreshing npm install..."
 npm install
 
-# If package-lock keeps old transitive strings, this will show them for review.
-echo "Remaining Supabase references:"
-grep -RIn "supabase\|SUPABASE\|@supabase" . --exclude-dir=node_modules --exclude-dir=.git || true
+Write-Host "Remaining Supabase references, excluding node_modules and .git:"
+$matches = Get-ChildItem -Recurse -File -Force |
+  Where-Object { $_.FullName -notmatch '\\node_modules\\|\\.git\\|package-lock\.json$' } |
+  Select-String -Pattern "supabase|SUPABASE|@supabase" -ErrorAction SilentlyContinue
+
+if ($matches) {
+  $matches | ForEach-Object { Write-Host ("{0}:{1}: {2}" -f $_.Path, $_.LineNumber, $_.Line.Trim()) }
+} else {
+  Write-Host "No Supabase source references found."
+}
+
+Write-Host "Done. Now run: npm run build"
