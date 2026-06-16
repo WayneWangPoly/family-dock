@@ -70,7 +70,7 @@ function normalizeActions(raw) {
 }
 function cleanAiText(value) {
     return value
-        .replace(/^["'鈥溾€濃€樷€橾+|["'鈥溾€濃€樷€欍€?.锛孿s]+$/g, "")
+        .replace(/^[\s"'`\u201c\u201d\u2018\u2019]+|[\s"'`\u201c\u201d\u2018\u2019\uff0c,\u3002.;\uff1b:\uff1a]+$/g, "")
         .trim();
 }
 function extractBetween(text, patterns) {
@@ -382,14 +382,14 @@ export const commitAiActions = onCall({ region: "us-central1" }, async (request)
         if (type === "homework_task") {
             const items = Array.isArray(action.items) && action.items.length > 0
                 ? action.items
-                : [{ label: "瀹屾垚浣滀笟", item_type: "checkbox", is_required: true }];
+                : [{ label: "Complete homework", item_type: "checkbox", is_required: true }];
             items.forEach((item, index) => {
                 const itemRef = db.collection(`families/${familyId}/homework_items`).doc();
                 batch.set(itemRef, {
                     id: itemRef.id,
                     family_id: familyId,
                     homework_task_id: ref.id,
-                    label: item.label ?? "瀹屾垚浣滀笟",
+                    label: item.label ?? "Complete homework",
                     item_type: item.item_type ?? "checkbox",
                     is_required: Boolean(item.is_required ?? true),
                     is_done: false,
