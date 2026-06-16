@@ -1,4 +1,5 @@
 rules_version = '2';
+
 service cloud.firestore {
   match /databases/{database}/documents {
     function signedIn() {
@@ -26,8 +27,11 @@ service cloud.firestore {
     }
 
     function isParent(familyId) {
-      return isMember(familyId)
-        && memberData(familyId).role in ["parent", "guardian", "owner"];
+      return isMember(familyId) && memberData(familyId).role in ["parent", "guardian", "owner"];
+    }
+
+    function onlyChanged(keys) {
+      return request.resource.data.diff(resource.data).affectedKeys().hasOnly(keys);
     }
 
     match /users/{uid} {
@@ -45,15 +49,15 @@ service cloud.firestore {
       match /members/{uid} {
         allow read: if isMember(familyId);
         allow create: if (
-          isSelf(uid)
-          && existsAfter(familyPath(familyId))
-          && getAfter(familyPath(familyId)).data.created_by == request.auth.uid
-          && request.resource.data.role in ["parent", "guardian", "owner"]
+          isSelf(uid) &&
+          existsAfter(familyPath(familyId)) &&
+          getAfter(familyPath(familyId)).data.created_by == request.auth.uid &&
+          request.resource.data.role in ["parent", "guardian", "owner"]
         ) || isParent(familyId);
-        allow update: if isParent(familyId)
-          || (isSelf(uid)
-            && request.resource.data.diff(resource.data).affectedKeys()
-              .hasOnly(["display_name", "avatar_url", "default_navigation_app", "updated_at"]));
+        allow update: if isParent(familyId) || (
+          isSelf(uid) &&
+          onlyChanged(["display_name", "avatar_url", "default_navigation_app", "updated_at"])
+        );
         allow delete: if isParent(familyId) && request.auth.uid != uid;
       }
 
@@ -80,24 +84,26 @@ service cloud.firestore {
       match /homework_items/{docId} {
         allow read: if isMember(familyId);
         allow create, delete: if isParent(familyId);
-        allow update: if isParent(familyId)
-          || (isMember(familyId)
-            && request.resource.data.diff(resource.data).affectedKeys()
-              .hasOnly(["is_done", "completed_by", "completed_at", "updated_at"]));
+        allow update: if isParent(familyId) || (
+          isMember(familyId) &&
+          onlyChanged(["is_done", "completed_by", "completed_at", "updated_at"])
+        );
       }
 
       match /homework_attachments/{docId} {
         allow read: if isMember(familyId);
-        allow create: if isMember(familyId)
-          && request.resource.data.uploaded_by == request.auth.uid;
+        allow create: if isMember(familyId) && request.resource.data.uploaded_by == request.auth.uid;
         allow update: if false;
         allow delete: if isParent(familyId) || resource.data.uploaded_by == request.auth.uid;
       }
 
       match /requests/{docId} {
         allow read: if isMember(familyId);
-        allow create: if isMember(familyId)
-          && (!('requester_id' in request.resource.data) || request.resource.data.requester_id == request.auth.uid || isParent(familyId));
+        allow create: if isMember(familyId) && (
+          !("requester_id" in request.resource.data) ||
+          request.resource.data.requester_id == request.auth.uid ||
+          isParent(familyId)
+        );
         allow update, delete: if isParent(familyId);
       }
 
@@ -116,6 +122,16 @@ service cloud.firestore {
         allow create, update, delete: if isParent(familyId);
       }
 
+      match /learning_progress_summaries/{docId} {
+        allow read: if isMember(familyId);
+        allow create, update, delete: if isParent(familyId);
+      }
+
+      match /progress_report_shares/{docId} {
+        allow read: if isMember(familyId);
+        allow create, update, delete: if isParent(familyId);
+      }
+
       match /meal_plans/{docId} {
         allow read: if isMember(familyId);
         allow create, update, delete: if isParent(familyId);
@@ -125,8 +141,6 @@ service cloud.firestore {
         allow read: if isMember(familyId);
         allow create, update, delete: if isParent(familyId);
       }
-
-
 
       match /route_departure_plans/{docId} {
         allow read: if isMember(familyId);
@@ -138,9 +152,51 @@ service cloud.firestore {
         allow create, update, delete: if isParent(familyId);
       }
 
+      match /route_departure_alerts/{docId} {
+        allow read: if isMember(familyId);
+        allow create, update, delete: if isParent(familyId);
+      }
+
       match /parent_handoff_messages/{docId} {
         allow read: if isMember(familyId);
         allow create, update, delete: if isParent(familyId);
+      }
+
+      match /notification_logs/{docId} {
+        allow read: if isMember(familyId);
+        allow create: if isParent(familyId);
+        allow update: if isParent(familyId) || (
+          isMember(familyId) &&
+          onlyChanged(["read_at", "read_by", "status", "updated_at"])
+        );
+        allow delete: if isParent(familyId);
+      }
+
+      match /push_subscriptions/{docId} {
+        allow read: if isParent(familyId);
+        allow create: if isMember(familyId);
+        allow update: if isParent(familyId) || isMember(familyId);
+        allow delete: if isParent(familyId) || isMember(familyId);
+      }
+
+      match /scheduled_job_settings/{docId} {
+        allow read: if isParent(familyId);
+        allow create, update, delete: if isParent(familyId);
+      }
+
+      match /scheduled_runner_logs/{docId} {
+        allow read: if isParent(familyId);
+        allow create: if isParent(familyId);
+        allow update, delete: if false;
+      }
+
+      match /member_invites/{docId} {
+        allow read, create, update, delete: if isParent(familyId);
+      }
+
+      // Temporary compatibility rule while old UI/modules are being unified to member_invites.
+      match /family_member_invites/{docId} {
+        allow read, create, update, delete: if isParent(familyId);
       }
 
       match /ai_logs/{docId} {
