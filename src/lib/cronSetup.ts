@@ -30,9 +30,9 @@ function withId<T>(snapshot: { id: string; data: () => Record<string, unknown> }
 
 export function defaultCronJobs(familyId: string): ScheduledJobDraft[] {
   return [
-    { family_id: familyId, job_name: "afternoon-route-runner", is_enabled: false, cron_expression: "*/5 14-20 * * 1-5", cadence_label: "Every 5 minutes, weekday afternoons", function_name: "scheduledFamilyRunner", runner_payload: { limit: 100, run_late_risk: true, run_route_alerts: true, run_family_reminders: false }, run_window_label: "School pickup / after-school activity window", notes: "Recommended for route risk and leave-now alerts." },
-    { family_id: familyId, job_name: "family-reminders", is_enabled: false, cron_expression: "*/15 7-21 * * *", cadence_label: "Every 15 minutes during daytime", function_name: "scheduledFamilyRunner", runner_payload: { limit: 100, run_late_risk: false, run_route_alerts: false, run_family_reminders: true }, run_window_label: "General daytime reminders", notes: "Recommended for homework, payment and event reminders." },
-    { family_id: familyId, job_name: "full-safety-runner", is_enabled: false, cron_expression: "*/10 7-21 * * *", cadence_label: "Every 10 minutes during daytime", function_name: "scheduledFamilyRunner", runner_payload: { limit: 100, run_late_risk: true, run_route_alerts: true, run_family_reminders: true }, run_window_label: "All-in-one safety runner", notes: "Use this instead of separate jobs if you prefer one cron." },
+    { family_id: familyId, job_name: "afternoon-route-runner", is_enabled: false, cron_expression: "*/5 14-20 * * 1-5", cadence_label: "Every 5 minutes, weekday afternoons", function_name: "scheduledFamilyRunner", runner_payload: { limit: 100, run_late_risk: true, run_route_alerts: true, run_family_reminders: false }, run_window_label: "School pickup / after-school activity window", notes: "Manual test preset. Production automation still needs an onSchedule function or an onRequest runner with CRON_SECRET." },
+    { family_id: familyId, job_name: "family-reminders", is_enabled: false, cron_expression: "*/15 7-21 * * *", cadence_label: "Every 15 minutes during daytime", function_name: "scheduledFamilyRunner", runner_payload: { limit: 100, run_late_risk: false, run_route_alerts: false, run_family_reminders: true }, run_window_label: "General daytime reminders", notes: "Manual test preset. Real reminder delivery still needs the production push sender to be completed." },
+    { family_id: familyId, job_name: "full-safety-runner", is_enabled: false, cron_expression: "*/10 7-21 * * *", cadence_label: "Every 10 minutes during daytime", function_name: "scheduledFamilyRunner", runner_payload: { limit: 100, run_late_risk: true, run_route_alerts: true, run_family_reminders: true }, run_window_label: "All-in-one safety runner", notes: "Manual test preset for combined runner checks. Do not treat this as an active production cron yet." },
   ];
 }
 
@@ -61,7 +61,7 @@ export async function runScheduledJobManually(args: { data: FamilyData; job: Sch
 
 export function buildCronCurl(args: { projectRef: string; job: ScheduledJobSetting; }) {
   const body = JSON.stringify(args.job.runner_payload ?? {}, null, 2);
-  return `curl -X POST "https://us-central1-${args.projectRef}.cloudfunctions.net/${args.job.function_name}" -H "Content-Type: application/json" -d '${body.replaceAll("'", "'\\''")}'`;
+  return `NOTE: ${args.job.function_name} is currently a callable/manual test runner. Plain curl will not trigger an onCall function correctly. Implement an onRequest + CRON_SECRET runner or Firebase onSchedule before using this as production cron. Payload preview:\n${body}`;
 }
 
 export function buildPgCronSql(args: { job: ScheduledJobSetting; projectRef: string; }) {

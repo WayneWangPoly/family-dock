@@ -85,7 +85,7 @@ export function TruePushPanel({ data, compact }: Props) {
     try {
       const result = await sendManualTestPush({ familyId: data.family.id }) as PushActionResult;
       setLastResult(result);
-      showToast(`Push test sent: ${result.sent ?? 0}`, "success");
+      showToast(`Push test logged: ${result.sent ?? 0}`, "success");
     } catch (error) {
       showError(error);
     } finally {
@@ -99,7 +99,7 @@ export function TruePushPanel({ data, compact }: Props) {
     try {
       const result = await runDueReminderCheck({ familyId: data.family.id }) as PushActionResult;
       setLastResult(result);
-      showToast(`Reminder check done. Sent ${result.sent ?? 0}.`, "success");
+      showToast(`Reminder check done. Logged ${result.sent ?? 0}.`, "success");
     } catch (error) {
       showError(error);
     } finally {
@@ -115,7 +115,7 @@ export function TruePushPanel({ data, compact }: Props) {
     <PanelCard>
       <SectionTitle
         title="True push notifications"
-        subtitle={compact ? "Cross-device push status" : "Service worker + VAPID + Firebase Functions"}
+        subtitle={compact ? "Cross-device push status" : "Push subscription + notification log. Real Web Push sender is pending."}
         right={<StatusPill label={subscribed ? "subscribed" : "not subscribed"} tone={subscribed ? "success" : "warning"} />}
       />
 
@@ -157,7 +157,7 @@ export function TruePushPanel({ data, compact }: Props) {
         </button>
 
         <button disabled={busy === "test"} onClick={sendTest} className="fd-button">
-          {busy === "test" ? "Sending..." : "Send push test"}
+          {busy === "test" ? "Sending..." : "Log push test"}
         </button>
 
         <button disabled={busy === "check"} onClick={runCheck} className="fd-button">

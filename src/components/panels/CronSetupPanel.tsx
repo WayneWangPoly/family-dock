@@ -54,7 +54,7 @@ export function CronSetupPanel({ data }: Props) {
       const rows = await ensureDefaultCronJobs(data);
       setJobs(rows);
       if (rows[0]) setSelectedJobId(rows[0].id);
-      showToast("Default cron jobs created.", "success");
+      showToast("Manual runner presets created.", "success");
     } catch (error) {
       showError(error);
     } finally {
@@ -70,7 +70,7 @@ export function CronSetupPanel({ data }: Props) {
         patch: { is_enabled: !job.is_enabled },
       });
       await refresh();
-      showToast("Cron job setting updated.", "success");
+      showToast("Manual runner setting updated.", "success");
     } catch (error) {
       showError(error);
     }
@@ -91,7 +91,7 @@ export function CronSetupPanel({ data }: Props) {
         cronSecret,
       });
       await refresh();
-      showToast("Manual scheduled runner completed.", "success");
+      showToast("Manual runner test completed.", "success");
       console.log("scheduled job result", result);
     } catch (error) {
       showError(error);
@@ -119,7 +119,7 @@ export function CronSetupPanel({ data }: Props) {
         />
 
         <div className="fd-alert warning">
-          CRON_SECRET 不会保存到数据库。这里输入只用于手动测试调用 Cloud Function。生产 cron 建议在 Firebase secrets / scheduled Cloud Functions 中配置。
+          This panel only runs manual callable tests. Production automation still needs Firebase onSchedule, or an onRequest runner protected by CRON_SECRET.
         </div>
 
         <div className="fd-grid two" style={{ marginTop: 14 }}>
@@ -241,11 +241,11 @@ export function CronSetupPanel({ data }: Props) {
               </label>
 
               <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                <button onClick={() => copy(buildCronCurl({ projectRef, job: selectedJob }), "curl copied.")} className="fd-button primary">
-                  Copy curl
+                <button onClick={() => copy(buildCronCurl({ projectRef, job: selectedJob }), "Runner note copied.")} className="fd-button primary">
+                  Copy runner note
                 </button>
-                <button onClick={() => copy(buildPgCronSql({ projectRef, job: selectedJob }), "Firebase Scheduler SQL copied.")} className="fd-button">
-                  Copy Firebase Scheduler SQL
+                <button onClick={() => copy(buildPgCronSql({ projectRef, job: selectedJob }), "Scheduler note copied.")} className="fd-button">
+                  Copy scheduler note
                 </button>
               </div>
 
@@ -261,7 +261,7 @@ export function CronSetupPanel({ data }: Props) {
       <PanelCard>
         <SectionTitle
           title="Runner logs"
-          subtitle="scheduled-family-runner / route-late-risk-check 的运行记录"
+          subtitle="Manual runner logs and scheduled test records"
           right={<StatusPill label={`${logs.length} logs`} tone="info" />}
         />
 
