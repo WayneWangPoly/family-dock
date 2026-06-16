@@ -1,23 +1,20 @@
-﻿import { httpsCallable } from "firebase/functions";
+import { httpsCallable } from "firebase/functions";
 import { firebaseFunctions } from "./firebaseClient";
 
 export type MemberAccountAction = "reset_password" | "disable" | "enable";
 
-export async function runMemberAccountAction(
-  _legacyClient: unknown,
-  input: {
-    familyId: string;
-    memberId: string;
-    action: MemberAccountAction;
-    newPassword?: string;
-  },
-) {
+export async function runMemberAccountAction(input: {
+  familyId: string;
+  memberId: string;
+  action: MemberAccountAction;
+  newPassword?: string;
+}) {
   const callable = httpsCallable(firebaseFunctions, "adminMemberAccountAction");
-  const result = await callable({
+  const response = await callable({
     familyId: input.familyId,
     memberId: input.memberId,
     action: input.action,
-    newPassword: input.newPassword ?? null,
+    newPassword: input.newPassword,
   });
-  return result.data;
+  return response.data;
 }

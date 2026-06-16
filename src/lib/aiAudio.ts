@@ -1,30 +1,31 @@
-import { supabase } from "./supabaseClient";
+﻿import { httpsCallable } from "firebase/functions";
+import { firebaseAuth, firebaseFunctions } from "./firebaseClient";
+
+function blobToBase64(blob: Blob) {
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const value = String(reader.result ?? "");
+      resolve(value.includes(",") ? value.split(",")[1] : value);
+    };
+    reader.onerror = () => reject(reader.error ?? new Error("Could not read audio blob."));
+    reader.readAsDataURL(blob);
+  });
+}
 
 export async function transcribeAudioBlob(blob: Blob) {
-  const { data: sessionData, error: sessionError } = await supabase.auth.getSession();
-  if (sessionError) throw sessionError;
-  const token = sessionData.session?.access_token;
-  if (!token) throw new Error("Please sign in again before using voice transcription.");
-
-  const form = new FormData();
-  const ext = blob.type.includes("mp4") ? "m4a" : blob.type.includes("ogg") ? "ogg" : "webm";
-  form.append("audio", blob, `family-dock-voice.${ext}`);
-
-  const baseUrl = import.meta.env.VITE_SUPABASE_URL;
-  if (!baseUrl) throw new Error("Supabase URL is not configured.");
-
-  const response = await fetch(`${baseUrl}/functions/v1/ai-transcribe-audio`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${token}`,
-    },
-    body: form,
-  });
-
-  const payload = await response.json().catch(() => null);
-  if (!response.ok) {
-    throw new Error(payload?.error ?? `Voice transcription failed (${response.status}).`);
+  if (!firebaseAuth.currentUser) {
+    throw new Error("Please sign in again before using voice transcription.");
   }
 
+  const ext = blob.type.includes("mp4") ? "m4a" : blob.type.includes("ogg") ? "ogg" : "webm";
+  const transcribeAudio = httpsCallable(firebaseFunctions, "transcribeAudio");
+  const result = await transcribeAudio({
+    audio_base64: await blobToBase64(blob),
+    mime_type: blob.type || "audio/webm",
+    filename: `family-dock-voice.${ext}`,
+  });
+
+  const payload = result.data as { text?: unknown } | null;
   return String(payload?.text ?? "").trim();
 }

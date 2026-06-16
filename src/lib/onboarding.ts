@@ -1,4 +1,5 @@
-import type { SupabaseClient } from "@supabase/supabase-js";
+import { httpsCallable } from "firebase/functions";
+import { firebaseFunctions } from "./firebaseClient";
 
 export type CreateFamilyAccountInput = {
   parentEmail: string;
@@ -10,25 +11,18 @@ export type CreateFamilyAccountInput = {
   schoolLevel?: string | null;
 };
 
-export async function createFamilyAccount(
-  supabase: SupabaseClient,
-  input: CreateFamilyAccountInput,
-) {
-  const { data, error } = await supabase.functions.invoke("public-create-family-account", {
-    body: {
-      parent_email: input.parentEmail,
-      parent_password: input.parentPassword,
-      parent_display_name: input.parentDisplayName,
-      family_name: input.familyName,
-      timezone: input.timezone ?? "Australia/Adelaide",
-      state_region: input.stateRegion ?? "SA",
-      school_level: input.schoolLevel ?? "primary",
-    },
+export async function createFamilyAccount(input: CreateFamilyAccountInput) {
+  const callable = httpsCallable(firebaseFunctions, "createFamilyAccount");
+  const response = await callable({
+    parentEmail: input.parentEmail,
+    parentPassword: input.parentPassword,
+    parentDisplayName: input.parentDisplayName,
+    familyName: input.familyName,
+    timezone: input.timezone ?? "Australia/Adelaide",
+    stateRegion: input.stateRegion ?? "SA",
+    schoolLevel: input.schoolLevel ?? "primary",
   });
-
-  if (error) throw error;
-
-  return data;
+  return response.data;
 }
 
 export type BulkMemberInviteInput = {
@@ -43,26 +37,23 @@ export type BulkMemberInviteInput = {
   baseUrl?: string;
 };
 
-export async function bulkMemberInvites(
-  supabase: SupabaseClient,
-  input: BulkMemberInviteInput,
-) {
-  const { data, error } = await supabase.functions.invoke("admin-bulk-member-invites", {
-    body: {
-      family_id: input.familyId,
-      members: input.members ?? [],
-      invite_existing_unlinked: input.inviteExistingUnlinked ?? false,
-      expires_in_days: input.expiresInDays ?? 14,
-      base_url: input.baseUrl ?? window.location.origin,
-    },
+export async function bulkMemberInvites(input: BulkMemberInviteInput) {
+  const callable = httpsCallable(firebaseFunctions, "bulkMemberInvites");
+  const response = await callable({
+    familyId: input.familyId,
+    members: input.members ?? [],
+    inviteExistingUnlinked: input.inviteExistingUnlinked ?? false,
+    expiresInDays: input.expiresInDays ?? 14,
+    baseUrl: input.baseUrl ?? window.location.origin,
   });
-
-  if (error) throw error;
-
-  return data;
+  return response.data as { ok: boolean; results: any[] };
 }
 
-export function parseMemberCsv(text: string): Array<{ display_name: string; role: "child" | "homestay"; email_hint: string | null }> {
+export function parseMemberCsv(text: string): Array<{
+  display_name: string;
+  role: "child" | "homestay";
+  email_hint: string | null;
+}> {
   const lines = text
     .split(/\r?\n/)
     .map((line) => line.trim())
@@ -73,14 +64,8 @@ export function parseMemberCsv(text: string): Array<{ display_name: string; role
     const displayName = parts[0] ?? "";
     const roleRaw = (parts[1] ?? "child").toLowerCase();
     const emailHint = parts[2] ?? "";
-
     const role = roleRaw === "homestay" ? "homestay" : "child";
-
-    return {
-      display_name: displayName,
-      role,
-      email_hint: emailHint || null,
-    };
+    return { display_name: displayName, role, email_hint: emailHint || null };
   });
 }
 

@@ -2,8 +2,6 @@ import { useState } from "react";
 import type { CSSProperties } from "react";
 import type { FamilyData, FamilyMember } from "../../lib/familyDataTypes";
 import { runMemberAccountAction } from "../../lib/accountActions";
-import { supabase } from "../../lib/supabaseClient";
-
 type Props = { data: FamilyData; member: FamilyMember; onSaved?: () => Promise<unknown> | unknown };
 
 export function AccountSecurityManager({ data, member, onSaved }: Props) {
@@ -20,7 +18,7 @@ export function AccountSecurityManager({ data, member, onSaved }: Props) {
     setMessage(null);
     setErrorMessage(null);
     try {
-      await runMemberAccountAction(supabase, { familyId: data.family.id, memberId: member.id, action, newPassword: action === "reset_password" ? newPassword : undefined });
+      await runMemberAccountAction({ familyId: data.family.id, memberId: member.id, action, newPassword: action === "reset_password" ? newPassword : undefined });
       setMessage(`${member.display_name}: ${action} done.`);
       setNewPassword("");
       await onSaved?.();

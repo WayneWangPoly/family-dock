@@ -19,9 +19,8 @@ type Props = {
 };
 
 function guessProjectRef() {
-  const url = String(import.meta.env.VITE_SUPABASE_URL ?? "");
-  const match = url.match(/https:\/\/([^.]+)\.supabase\.co/);
-  return match?.[1] ?? "YOUR_PROJECT_REF";
+  const projectId = String(import.meta.env.VITE_FIREBASE_PROJECT_ID ?? "");
+  return projectId || "YOUR_FIREBASE_PROJECT_ID";
 }
 
 export function CronSetupPanel({ data }: Props) {
@@ -115,12 +114,12 @@ export function CronSetupPanel({ data }: Props) {
       <PanelCard raised>
         <SectionTitle
           title="Cron setup centre"
-          subtitle="管理 scheduled runner 配置，复制 curl / pg_cron，手动测试运行"
+          subtitle="管理 scheduled runner 配置，复制 curl / Firebase Scheduler，手动测试运行"
           right={<StatusPill label={`${jobs.length} jobs`} tone={jobs.length ? "success" : "warning"} />}
         />
 
         <div className="fd-alert warning">
-          CRON_SECRET 不会保存到数据库。这里输入只用于手动测试调用 Edge Function。生产 cron 建议在 Supabase secrets / Scheduled Functions / pg_cron 中配置。
+          CRON_SECRET 不会保存到数据库。这里输入只用于手动测试调用 Cloud Function。生产 cron 建议在 Firebase secrets / scheduled Cloud Functions 中配置。
         </div>
 
         <div className="fd-grid two" style={{ marginTop: 14 }}>
@@ -153,7 +152,7 @@ export function CronSetupPanel({ data }: Props) {
         <PanelCard>
           <SectionTitle
             title="Scheduled job settings"
-            subtitle="这些是 App 内记录的计划任务配置，不等于 Supabase 已自动创建 cron"
+            subtitle="这些是 App 内记录的计划任务配置，不等于 Firebase Scheduler 已自动创建任务"
           />
 
           {jobs.length === 0 ? (
@@ -245,8 +244,8 @@ export function CronSetupPanel({ data }: Props) {
                 <button onClick={() => copy(buildCronCurl({ projectRef, job: selectedJob }), "curl copied.")} className="fd-button primary">
                   Copy curl
                 </button>
-                <button onClick={() => copy(buildPgCronSql({ projectRef, job: selectedJob }), "pg_cron SQL copied.")} className="fd-button">
-                  Copy pg_cron SQL
+                <button onClick={() => copy(buildPgCronSql({ projectRef, job: selectedJob }), "Firebase Scheduler SQL copied.")} className="fd-button">
+                  Copy Firebase Scheduler SQL
                 </button>
               </div>
 

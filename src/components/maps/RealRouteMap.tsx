@@ -9,7 +9,6 @@ import {
   geocodeFamilyPlaces,
   loadGoogleMaps,
 } from "../../lib/googleMaps";
-import { supabase } from "../../lib/supabaseClient";
 import type { RouteLegSummary } from "../../lib/routePlanner";
 
 type Props = {
@@ -94,7 +93,7 @@ export function RealRouteMap({
     setMapError(null);
 
     try {
-      await geocodeFamilyPlaces(supabase, {
+      await geocodeFamilyPlaces({
         familyId: data.family.id,
         placeIds: missingPlaces,
         geocodeMissingOnly: true,

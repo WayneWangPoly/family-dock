@@ -1,83 +1,29 @@
+﻿import { collection, getDocs, limit, orderBy, query, where } from "firebase/firestore";
+import { httpsCallable } from "firebase/functions";
 import type { FamilyData } from "./familyDataTypes";
-import { supabase } from "./supabaseClient";
+import { firebaseFunctions, firestore } from "./firebaseClient";
 
-export type RouteLateRiskCheck = {
-  id: string;
-  family_id: string;
-  plan_id: string;
-  leg_id: string | null;
-  check_time: string;
-  risk_level: "low" | "normal" | "medium" | "high" | "late";
-  minutes_to_recommended: number | null;
-  minutes_to_latest_safe: number | null;
-  message: string;
-  recommendation: string | null;
-  status: "active" | "resolved" | "ignored";
-  created_at: string;
-};
+export type RouteLateRiskCheck = { id: string; family_id: string; plan_id: string; leg_id: string | null; check_time: string; risk_level: "low" | "normal" | "medium" | "high" | "late"; minutes_to_recommended: number | null; minutes_to_latest_safe: number | null; message: string; recommendation: string | null; status: "active" | "resolved" | "ignored"; created_at: string; };
+export type ScheduledRunnerLog = { id: string; runner_name: string; run_mode: "manual" | "cron" | "test"; family_id: string | null; started_at: string; finished_at: string | null; status: "running" | "completed" | "failed" | "skipped"; summary: Record<string, unknown>; error_message: string | null; created_at: string; };
 
-export type ScheduledRunnerLog = {
-  id: string;
-  runner_name: string;
-  run_mode: "manual" | "cron" | "test";
-  family_id: string | null;
-  started_at: string;
-  finished_at: string | null;
-  status: "running" | "completed" | "failed" | "skipped";
-  summary: Record<string, any>;
-  error_message: string | null;
-  created_at: string;
-};
+function withId<T>(snapshot: { id: string; data: () => Record<string, unknown> }) { return { id: snapshot.id, ...snapshot.data() } as T; }
+function familyCollection(familyId: string, name: string) { return collection(firestore, "families", familyId, name); }
 
-export async function runLateRiskCheck(args: {
-  data: FamilyData;
-  planId?: string | null;
-}) {
-  const { data, error } = await supabase.functions.invoke("route-late-risk-check", {
-    body: {
-      family_id: args.data.family.id,
-      plan_id: args.planId ?? null,
-      mode: "manual",
-      limit: 100,
-    },
-  });
-
-  if (error) throw error;
-  return data as {
-    ok: boolean;
-    checked_plans: number;
-    checked_legs: number;
-    high_or_late: number;
-    risks: Array<{ plan_id: string; risk: string; message: string }>;
-  };
+export async function runLateRiskCheck(args: { data: FamilyData; planId?: string | null; }) {
+  const fn = httpsCallable(firebaseFunctions, "routeLateRiskCheck");
+  const result = await fn({ family_id: args.data.family.id, plan_id: args.planId ?? null, mode: "manual", limit: 100 });
+  return result.data as { ok: boolean; checked_plans: number; checked_legs: number; high_or_late: number; risks: Array<{ plan_id: string; risk: string; message: string }>; };
 }
 
 export async function loadLateRiskChecks(familyId: string, planId?: string | null) {
-  let query = supabase
-    .from("route_late_risk_checks")
-    .select("*")
-    .eq("family_id", familyId)
-    .order("created_at", { ascending: false })
-    .limit(80);
-
-  if (planId) query = query.eq("plan_id", planId);
-
-  const { data, error } = await query;
-  if (error) throw error;
-
-  return (data ?? []) as RouteLateRiskCheck[];
+  const constraints = planId ? [where("plan_id", "==", planId), orderBy("created_at", "desc"), limit(80)] : [orderBy("created_at", "desc"), limit(80)];
+  const snap = await getDocs(query(familyCollection(familyId, "route_late_risk_checks"), ...constraints));
+  return snap.docs.map((docSnap) => withId<RouteLateRiskCheck>(docSnap));
 }
 
 export async function loadScheduledRunnerLogs(familyId: string) {
-  const { data, error } = await supabase
-    .from("scheduled_runner_logs")
-    .select("*")
-    .or(`family_id.eq.${familyId},family_id.is.null`)
-    .order("created_at", { ascending: false })
-    .limit(80);
-
-  if (error) throw error;
-  return (data ?? []) as ScheduledRunnerLog[];
+  const snap = await getDocs(query(familyCollection(familyId, "scheduled_runner_logs"), orderBy("created_at", "desc"), limit(80)));
+  return snap.docs.map((docSnap) => withId<ScheduledRunnerLog>(docSnap));
 }
 
 export function lateRiskTone(risk: string) {

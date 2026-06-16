@@ -1,6 +1,15 @@
-﻿import type { FamilyData } from "./familyDataTypes";
+import type { FamilyData } from "./familyDataTypes";
 
 export type ProductionCheckSeverity = "pass" | "info" | "warning" | "fail";
+
+export type ProductionSummary = {
+  pass?: number;
+  info?: number;
+  warning?: number;
+  fail?: number;
+  total?: number;
+  [key: string]: number | undefined;
+};
 
 export type ProductionCheckItem = {
   id?: string;
@@ -25,7 +34,7 @@ export type ProductionCheckRun = {
   status: "running" | "completed" | "failed";
   started_at: string;
   finished_at: string | null;
-  summary: Record<string, unknown>;
+  summary: ProductionSummary;
   error_message: string | null;
   created_at: string;
 };
@@ -60,7 +69,9 @@ function countRecords(data: FamilyData): Record<string, number> {
   );
 }
 
-function makeItem(input: Omit<ProductionCheckItem, "id" | "created_at" | "status">): ProductionCheckItem {
+function makeItem(
+  input: Omit<ProductionCheckItem, "id" | "created_at" | "status">,
+): ProductionCheckItem {
   return {
     ...input,
     id: `local-check-${Math.random().toString(36).slice(2)}`,
@@ -84,7 +95,7 @@ export async function runProductionHealthAudit(args: {
     check_key: "firebase_backend",
     severity: "pass",
     title: "Firebase backend active",
-    message: "This build uses the Firebase data layer. Supabase runtime calls have been removed from the production hardening module.",
+    message: "This build uses Firebase Auth, Firestore, Storage and callable Cloud Functions.",
     recommendation: null,
     details: { backend: "firebase" },
   }));
@@ -118,6 +129,7 @@ export async function runProductionHealthAudit(args: {
 
   const fail = items.filter((item) => item.severity === "fail").length;
   const warning = items.filter((item) => item.severity === "warning").length;
+  const info = items.filter((item) => item.severity === "info").length;
   const pass = items.filter((item) => item.severity === "pass").length;
 
   const run: ProductionCheckRun = {
@@ -128,7 +140,7 @@ export async function runProductionHealthAudit(args: {
     status: "completed",
     started_at: startedAt,
     finished_at: new Date().toISOString(),
-    summary: { pass, warning, fail, total: items.length },
+    summary: { pass, info, warning, fail, total: items.length },
     error_message: null,
     created_at: startedAt,
   };
@@ -145,11 +157,11 @@ export async function runProductionHealthAudit(args: {
   };
 }
 
-export async function loadProductionCheckRuns(familyId: string) {
+export async function loadProductionCheckRuns(familyId: string): Promise<ProductionCheckRun[]> {
   return localRuns.get(familyId) ?? [];
 }
 
-export async function loadProductionCheckItems(_familyId: string, runId: string) {
+export async function loadProductionCheckItems(_familyId: string, runId: string): Promise<ProductionCheckItem[]> {
   return localItems.get(runId) ?? [];
 }
 
@@ -191,7 +203,7 @@ export async function exportFamilyData(args: {
   };
 }
 
-export async function loadFamilyDataExportLogs(familyId: string) {
+export async function loadFamilyDataExportLogs(familyId: string): Promise<FamilyDataExportLog[]> {
   return localExportLogs.get(familyId) ?? [];
 }
 
@@ -236,14 +248,15 @@ export function buildDiagnosticText(args: {
       `[${item.severity.toUpperCase()}] ${item.category} / ${item.title}`,
       item.message,
       item.recommendation ? `Recommendation: ${item.recommendation}` : "",
-    ].filter(Boolean).join("`n")),
+    ].filter(Boolean).join("\n")),
     "",
     "Recent exports",
     ...(args.exportLogs ?? [])
       .slice(0, 5)
       .map((log) => `${log.created_at} 路 ${log.file_name ?? "export"} 路 ${JSON.stringify(log.table_counts)}`),
   ].filter(Boolean);
-  return lines.join("`n`n");
+
+  return lines.join("\n\n");
 }
 
 export function productionChecklistItems() {

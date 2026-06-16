@@ -6,8 +6,6 @@ import {
   formatInviteResultsForCopy,
   parseMemberCsv,
 } from "../../lib/onboarding";
-import { supabase } from "../../lib/supabaseClient";
-
 type Props = {
   data: FamilyData;
   onSaved?: () => Promise<unknown> | unknown;
@@ -26,7 +24,7 @@ export function BulkInviteManager({ data, onSaved }: Props) {
 
     try {
       const members: Array<{ display_name: string; role: "child" | "homestay"; email_hint?: string | null }> = parseMemberCsv(csvText);
-      const result = await bulkMemberInvites(supabase, {
+      const result = await bulkMemberInvites({
         familyId: data.family.id,
         members,
         baseUrl: window.location.origin,
@@ -48,7 +46,7 @@ export function BulkInviteManager({ data, onSaved }: Props) {
     setResults([]);
 
     try {
-      const result = await bulkMemberInvites(supabase, {
+      const result = await bulkMemberInvites({
         familyId: data.family.id,
         inviteExistingUnlinked: true,
         baseUrl: window.location.origin,

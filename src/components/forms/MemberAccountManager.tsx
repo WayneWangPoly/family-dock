@@ -2,8 +2,6 @@ import { useMemo, useState } from "react";
 import type { CSSProperties } from "react";
 import type { FamilyData, FamilyMember } from "../../lib/familyDataTypes";
 import { generateTemporaryPassword, upsertMemberAccount } from "../../lib/memberAccounts";
-import { supabase } from "../../lib/supabaseClient";
-
 type Props = {
   data: FamilyData;
   member: FamilyMember;
@@ -44,7 +42,7 @@ export function MemberAccountManager({ data, member, onSaved }: Props) {
     setErrorMessage(null);
 
     try {
-      const result = await upsertMemberAccount(supabase, {
+      const result: any = await upsertMemberAccount({
         familyId: data.family.id,
         memberId: member.id,
         email,
@@ -70,7 +68,7 @@ export function MemberAccountManager({ data, member, onSaved }: Props) {
         <div>
           <strong>{member.display_name}</strong>
           <div style={mutedStyle}>
-            {member.role} · {isLoginReady ? "login enabled" : "no login yet"}
+            {member.role} 路 {isLoginReady ? "login enabled" : "no login yet"}
           </div>
         </div>
         <span style={pillStyle}>{member.role}</span>

@@ -1,4 +1,6 @@
-import type { SupabaseClient } from "@supabase/supabase-js";
+import { collection, getDocs, limit, orderBy, query } from "firebase/firestore";
+import { httpsCallable } from "firebase/functions";
+import { firebaseFunctions, firestore } from "./firebaseClient";
 
 export type SummarizeLearningInput = {
   familyId: string;
@@ -11,45 +13,14 @@ export type SummarizeLearningInput = {
   saveSummary?: boolean;
 };
 
-export async function summarizeLearning(
-  supabase: SupabaseClient,
-  input: SummarizeLearningInput,
-) {
-  const { data, error } = await supabase.functions.invoke("ai-summarize-learning", {
-    body: {
-      family_id: input.familyId,
-      child_id: input.childId ?? null,
-      child_name: input.childName ?? null,
-      course_name: input.courseName ?? null,
-      range_type: input.rangeType,
-      start_date: input.startDate,
-      end_date: input.endDate,
-      save_summary: input.saveSummary ?? true,
-    },
-  });
-
-  if (error) {
-    throw error;
-  }
-
-  return data;
+export async function summarizeLearning(input: SummarizeLearningInput) {
+  const callable = httpsCallable(firebaseFunctions, "summarizeLearning");
+  const response = await callable(input);
+  return response.data;
 }
 
-export async function loadLearningSummaries(
-  supabase: SupabaseClient,
-  familyId: string,
-  limit = 20,
-) {
-  const { data, error } = await supabase
-    .from("learning_summaries")
-    .select("*")
-    .eq("family_id", familyId)
-    .order("created_at", { ascending: false })
-    .limit(limit);
-
-  if (error) {
-    throw error;
-  }
-
-  return data ?? [];
+export async function loadLearningSummaries(familyId: string, rowLimit = 20) {
+  const ref = collection(firestore, "families", familyId, "learning_summaries");
+  const snapshot = await getDocs(query(ref, orderBy("created_at", "desc"), limit(rowLimit)));
+  return snapshot.docs.map((item) => ({ id: item.id, ...item.data() }));
 }

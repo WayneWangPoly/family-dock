@@ -1,4 +1,4 @@
-// Editing locks belonged to the earlier Supabase multi-user admin workflow.
+// Editing locks are disabled in the current Firebase workflow.
 // The Firebase consumer version does not expose editing locks or lock controls.
 export function useEditingLock(_args?: unknown) {
   return {

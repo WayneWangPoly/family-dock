@@ -1,26 +1,22 @@
-import type { SupabaseClient } from "@supabase/supabase-js";
+import { httpsCallable } from "firebase/functions";
+import { firebaseFunctions } from "./firebaseClient";
 
 export type CreateMemberInviteInput = {
   familyId: string;
   memberId: string;
   expiresInDays?: number;
+  baseUrl?: string;
 };
 
-export async function createMemberInvite(
-  supabase: SupabaseClient,
-  input: CreateMemberInviteInput,
-) {
-  const { data, error } = await supabase.functions.invoke("admin-create-member-invite", {
-    body: {
-      family_id: input.familyId,
-      member_id: input.memberId,
-      expires_in_days: input.expiresInDays ?? 14,
-    },
+export async function createMemberInvite(input: CreateMemberInviteInput) {
+  const callable = httpsCallable(firebaseFunctions, "createMemberInvite");
+  const response = await callable({
+    familyId: input.familyId,
+    memberId: input.memberId,
+    expiresInDays: input.expiresInDays ?? 14,
+    baseUrl: input.baseUrl ?? window.location.origin,
   });
-
-  if (error) throw error;
-
-  return data;
+  return response.data as { ok: boolean; invite: Record<string, any> };
 }
 
 export type SelfRegisterMemberInput = {
@@ -29,19 +25,12 @@ export type SelfRegisterMemberInput = {
   password: string;
 };
 
-export async function selfRegisterMember(
-  supabase: SupabaseClient,
-  input: SelfRegisterMemberInput,
-) {
-  const { data, error } = await supabase.functions.invoke("self-register-member-account", {
-    body: {
-      invite_code: input.inviteCode,
-      email: input.email,
-      password: input.password,
-    },
+export async function selfRegisterMember(input: SelfRegisterMemberInput) {
+  const callable = httpsCallable(firebaseFunctions, "selfRegisterMember");
+  const response = await callable({
+    inviteCode: input.inviteCode,
+    email: input.email,
+    password: input.password,
   });
-
-  if (error) throw error;
-
-  return data;
+  return response.data;
 }

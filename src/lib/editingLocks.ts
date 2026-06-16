@@ -1,4 +1,15 @@
-import type { SupabaseClient } from "@supabase/supabase-js";
+import {
+  collection,
+  deleteDoc,
+  doc,
+  getDoc,
+  getDocs,
+  query,
+  setDoc,
+  updateDoc,
+  where,
+} from "firebase/firestore";
+import { firestore } from "./firebaseClient";
 import { getCurrentFamilyRole } from "./familyDataApi";
 
 export type EditingLock = {
@@ -26,65 +37,55 @@ export function getLockExpiry(seconds = 75): string {
   return new Date(Date.now() + seconds * 1000).toISOString();
 }
 
-export async function cleanupExpiredEditingLocks(
-  supabase: SupabaseClient,
-  familyId: string,
-) {
-  const { error } = await supabase
-    .from("editing_locks")
-    .delete()
-    .eq("family_id", familyId)
-    .lt("expires_at", new Date().toISOString());
-
-  if (error) throw error;
+function lockId(target: LockTarget) {
+  return `${target.targetTable}_${target.targetId}`.replace(/[^a-zA-Z0-9_-]/g, "_");
 }
 
-export async function loadEditingLock(
-  supabase: SupabaseClient,
-  target: LockTarget,
-): Promise<EditingLock | null> {
-  const { data, error } = await supabase
-    .from("editing_locks")
-    .select(`
-      *,
-      family_members:locked_by (
-        id,
-        display_name,
-        role
-      )
-    `)
-    .eq("family_id", target.familyId)
-    .eq("target_table", target.targetTable)
-    .eq("target_id", target.targetId)
-    .maybeSingle();
+function lockRef(target: LockTarget) {
+  return doc(firestore, "families", target.familyId, "editing_locks", lockId(target));
+}
 
-  if (error) throw error;
+async function hydrateMember(lock: EditingLock): Promise<EditingLock> {
+  if (!lock.locked_by) return { ...lock, family_members: null };
+  const memberSnap = await getDoc(doc(firestore, "families", lock.family_id, "members", lock.locked_by));
+  if (!memberSnap.exists()) return { ...lock, family_members: null };
+  const member = memberSnap.data() as any;
+  return {
+    ...lock,
+    family_members: {
+      id: memberSnap.id,
+      display_name: member.display_name ?? "Someone",
+      role: member.role ?? "member",
+    },
+  };
+}
 
-  if (!data) return null;
+export async function cleanupExpiredEditingLocks(familyId: string) {
+  const ref = collection(firestore, "families", familyId, "editing_locks");
+  const snapshot = await getDocs(query(ref, where("expires_at", "<", new Date().toISOString())));
+  await Promise.all(snapshot.docs.map((item) => deleteDoc(item.ref)));
+}
 
+export async function loadEditingLock(target: LockTarget): Promise<EditingLock | null> {
+  const snap = await getDoc(lockRef(target));
+  if (!snap.exists()) return null;
+  const data = { id: snap.id, ...snap.data() } as EditingLock;
   if (new Date(data.expires_at).getTime() < Date.now()) {
-    await cleanupExpiredEditingLocks(supabase, target.familyId);
+    await deleteDoc(snap.ref);
     return null;
   }
-
-  return data as EditingLock;
+  return hydrateMember(data);
 }
 
-export async function acquireEditingLock(
-  supabase: SupabaseClient,
-  target: LockTarget,
-): Promise<EditingLock> {
+export async function acquireEditingLock(target: LockTarget): Promise<EditingLock> {
   const role = await getCurrentFamilyRole();
-
-  const existing = await loadEditingLock(supabase, target);
-
+  const existing = await loadEditingLock(target);
   if (existing && existing.locked_by && existing.locked_by !== role.member_id) {
-    throw new Error(
-      `${existing.family_members?.display_name ?? "Someone"} is editing this item.`,
-    );
+    throw new Error(`${existing.family_members?.display_name ?? "Someone"} is editing this item.`);
   }
 
-  const payload = {
+  const payload: EditingLock = {
+    id: lockId(target),
     family_id: target.familyId,
     target_table: target.targetTable,
     target_id: target.targetId,
@@ -93,73 +94,24 @@ export async function acquireEditingLock(
     expires_at: getLockExpiry(),
   };
 
-  const { data, error } = await supabase
-    .from("editing_locks")
-    .upsert(payload, {
-      onConflict: "family_id,target_table,target_id",
-    })
-    .select(`
-      *,
-      family_members:locked_by (
-        id,
-        display_name,
-        role
-      )
-    `)
-    .single();
-
-  if (error) throw error;
-
-  return data as EditingLock;
+  await setDoc(lockRef(target), payload, { merge: true });
+  return hydrateMember(payload);
 }
 
-export async function heartbeatEditingLock(
-  supabase: SupabaseClient,
-  target: LockTarget,
-): Promise<EditingLock | null> {
+export async function heartbeatEditingLock(target: LockTarget): Promise<EditingLock | null> {
   const role = await getCurrentFamilyRole();
-
   if (!role.member_id) return null;
-
-  const { data, error } = await supabase
-    .from("editing_locks")
-    .update({
-      expires_at: getLockExpiry(),
-    })
-    .eq("family_id", target.familyId)
-    .eq("target_table", target.targetTable)
-    .eq("target_id", target.targetId)
-    .eq("locked_by", role.member_id)
-    .select(`
-      *,
-      family_members:locked_by (
-        id,
-        display_name,
-        role
-      )
-    `)
-    .maybeSingle();
-
-  if (error) throw error;
-
-  return data as EditingLock | null;
+  const existing = await loadEditingLock(target);
+  if (!existing || existing.locked_by !== role.member_id) return null;
+  await updateDoc(lockRef(target), { expires_at: getLockExpiry() });
+  return loadEditingLock(target);
 }
 
-export async function releaseEditingLock(
-  supabase: SupabaseClient,
-  target: LockTarget,
-) {
+export async function releaseEditingLock(target: LockTarget) {
   const role = await getCurrentFamilyRole();
-
   if (!role.member_id) return;
-
-  const { error } = await supabase
-    .from("editing_locks")
-    .delete()
-    .eq("family_id", target.familyId)
-    .eq("target_table", target.targetTable)
-    .eq("target_id", target.targetId)
-    .eq("locked_by", role.member_id);
-
-  if (error) throw error;
+  const existing = await loadEditingLock(target);
+  if (existing?.locked_by === role.member_id) {
+    await deleteDoc(lockRef(target));
+  }
 }

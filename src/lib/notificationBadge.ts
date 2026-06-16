@@ -1,27 +1,15 @@
-import { supabase } from "./supabaseClient";
+﻿import { collection, getDocs, query, where, writeBatch, doc } from "firebase/firestore";
+import { firestore } from "./firebaseClient";
 
 export async function loadUnreadNotificationCount(familyId: string) {
-  const { count, error } = await supabase
-    .from("notification_logs")
-    .select("id", { count: "exact", head: true })
-    .eq("family_id", familyId)
-    .eq("status", "sent")
-    .is("read_at", null)
-    .is("archived_at", null);
-
-  if (error) throw error;
-
-  return count ?? 0;
+  const snap = await getDocs(query(collection(firestore, "families", familyId, "notification_logs"), where("status", "==", "sent"), where("read_at", "==", null), where("archived_at", "==", null)));
+  return snap.size;
 }
 
 export async function markAllNotificationsRead(familyId: string) {
-  const { error } = await supabase
-    .from("notification_logs")
-    .update({ read_at: new Date().toISOString() })
-    .eq("family_id", familyId)
-    .eq("status", "sent")
-    .is("read_at", null)
-    .is("archived_at", null);
-
-  if (error) throw error;
+  const snap = await getDocs(query(collection(firestore, "families", familyId, "notification_logs"), where("status", "==", "sent"), where("read_at", "==", null), where("archived_at", "==", null)));
+  const batch = writeBatch(firestore);
+  const now = new Date().toISOString();
+  snap.docs.forEach((item) => batch.update(doc(firestore, "families", familyId, "notification_logs", item.id), { read_at: now }));
+  await batch.commit();
 }

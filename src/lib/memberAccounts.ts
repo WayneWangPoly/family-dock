@@ -1,33 +1,45 @@
-﻿import { httpsCallable } from "firebase/functions";
-import { firebaseFunctions } from "./firebaseClient";
+import { doc, getDoc } from "firebase/firestore";
+import { httpsCallable } from "firebase/functions";
+import { firebaseFunctions, firestore } from "./firebaseClient";
+import type { FamilyMember } from "./familyDataTypes";
 
 export type UpsertMemberAccountInput = {
   familyId: string;
-  memberId?: string | null;
+  memberId: string;
   email: string;
   password: string;
-  displayName?: string;
-  role?: "parent" | "guardian" | "child" | "homestay";
-  color?: string | null;
-  defaultNavigationApp?: string;
 };
 
-export async function upsertMemberAccount(
-  _legacyClient: unknown,
-  input: UpsertMemberAccountInput,
-) {
+type CreateMemberLoginResult = {
+  ok: boolean;
+  uid: string;
+  member_id: string;
+};
+
+export async function upsertMemberAccount(input: UpsertMemberAccountInput) {
+  const memberSnap = await getDoc(doc(firestore, "families", input.familyId, "members", input.memberId));
+  if (!memberSnap.exists()) {
+    throw new Error("Member not found in Firestore.");
+  }
+
+  const member = { id: memberSnap.id, ...memberSnap.data() } as FamilyMember;
   const callable = httpsCallable(firebaseFunctions, "createMemberLogin");
-  const result = await callable({
+  const response = await callable({
     familyId: input.familyId,
-    memberId: input.memberId ?? null,
+    memberId: input.memberId,
+    displayName: member.display_name,
     email: input.email,
     password: input.password,
-    displayName: input.displayName ?? input.email.split("@")[0],
-    role: input.role ?? "child",
-    color: input.color ?? null,
-    defaultNavigationApp: input.defaultNavigationApp ?? "google",
+    role: member.role,
+    color: member.color ?? null,
+    defaultNavigationApp: member.default_navigation_app ?? "google",
   });
-  return result.data;
+
+  const data = response.data as CreateMemberLoginResult;
+  return {
+    member: { ...member, id: data.member_id, auth_user_id: data.uid, can_login: true, email: input.email },
+    account: { created: true, email: input.email, uid: data.uid },
+  };
 }
 
 export function generateTemporaryPassword() {

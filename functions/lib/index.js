@@ -70,7 +70,7 @@ function normalizeActions(raw) {
 }
 function cleanAiText(value) {
     return value
-        .replace(/^["'“”‘’]+|["'“”‘’。,.，\s]+$/g, "")
+        .replace(/^["'鈥溾€濃€樷€橾+|["'鈥溾€濃€樷€欍€?.锛孿s]+$/g, "")
         .trim();
 }
 function extractBetween(text, patterns) {
@@ -84,32 +84,62 @@ function extractBetween(text, patterns) {
 function parseLocalFallbackAction(transcript, uid) {
     const text = transcript.trim();
     const lower = text.toLowerCase();
-    const isPlace = /地点|地址|位置|location|place|address|school|club|home|学校|俱乐部|家/i.test(text) &&
-        /添加|新增|增加|加入|保存|add|create|save|new/i.test(text);
-    if (isPlace) {
-        let name = extractBetween(text, [
-            /(?:名字|名称|地点名|name|named|called)\s*(?:叫|为|是|is|:|：)?\s*["“]?([^"“”'，,。；;\n]+)["”]?/i,
-            /(?:添加|新增|增加|加入|保存|add|create|save|new)\s*(?:一个|a|new)?\s*(?:地点|位置|location|place)?\s*["“]?([^"“”'，,。；;\n]+?)["”]?\s*(?:，|,|。|地址|address|at|$)/i,
-        ]);
-        const address = extractBetween(text, [
-            /(?:地址|address)\s*(?:是|为|:|：)?\s*([^。；;\n]+)/i,
-            /(?:at|located at)\s+([^。；;\n]+)/i,
-        ]) || null;
-        if (!name && address) {
+    const hasPlaceKeyword = /location|place|address|school|club|home/i.test(text) ||
+        text.includes("\u5730\u70b9") ||
+        text.includes("\u5730\u5740") ||
+        text.includes("\u4f4d\u7f6e") ||
+        text.includes("\u5b66\u6821") ||
+        text.includes("\u4ff1\u4e50\u90e8") ||
+        text.includes("\u5bb6");
+    const hasAddKeyword = /add|create|save|new/i.test(text) ||
+        text.includes("\u6dfb\u52a0") ||
+        text.includes("\u65b0\u589e") ||
+        text.includes("\u589e\u52a0") ||
+        text.includes("\u52a0\u5165") ||
+        text.includes("\u4fdd\u5b58");
+    const extractValueAfter = (keywords) => {
+        for (const keyword of keywords) {
+            const index = lower.indexOf(keyword.toLowerCase());
+            if (index >= 0) {
+                const raw = text.slice(index + keyword.length).replace(/^[:：,\s]+/, "").trim();
+                if (raw)
+                    return cleanAiText(raw.split(/[。；;\n]/)[0] ?? raw);
+            }
+        }
+        return "";
+    };
+    if (hasPlaceKeyword && hasAddKeyword) {
+        let address = extractValueAfter(["address", "located at", "at"]) ||
+            extractValueAfter(["\u5730\u5740", "\u4f4d\u7f6e"]);
+        let name = extractValueAfter(["name", "named", "called"]) ||
+            extractValueAfter(["\u540d\u5b57", "\u540d\u79f0", "\u5730\u70b9\u540d"]);
+        if (!name) {
             name = text
-                .replace(/(?:添加|新增|增加|加入|保存|add|create|save|new)\s*(?:一个|a|new)?\s*(?:地点|位置|location|place)?/i, "")
-                .replace(/(?:地址|address)\s*(?:是|为|:|：)?.*$/i, "")
+                .replace(/add|create|save|new|location|place|address|school|club|home/gi, "")
+                .replace(/\u6dfb\u52a0|\u65b0\u589e|\u589e\u52a0|\u52a0\u5165|\u4fdd\u5b58|\u5730\u70b9|\u5730\u5740|\u4f4d\u7f6e/g, "")
+                .split(/[。；;\n]/)[0]
                 .trim();
         }
+        if (!address && lower.includes(" at ")) {
+            address = cleanAiText(text.slice(lower.indexOf(" at ") + 4));
+        }
         name = cleanAiText(name || "New place");
-        if (["一个地点", "地点", "location", "place", "new place"].includes(name.toLowerCase()))
+        if (!name || ["location", "place", "new place"].includes(name.toLowerCase())) {
             name = "New place";
+        }
+        const placeType = lower.includes("school") || text.includes("\u5b66\u6821")
+            ? "school"
+            : lower.includes("club") || text.includes("\u4ff1\u4e50\u90e8")
+                ? "club"
+                : lower.includes("home") || text.includes("\u5bb6")
+                    ? "home"
+                    : "other";
         return {
             intent: "add_place",
             confidence: address ? 0.9 : 0.65,
             language: /[\u4e00-\u9fff]/.test(text) ? "zh" : "en",
             needs_clarification: !address,
-            clarifying_question: address ? null : "这个地点的地址是什么？",
+            clarifying_question: address ? null : "What is the address for this place?",
             missing_fields: address ? [] : ["address"],
             draft_summary: `Add place: ${name}`,
             actions: [
@@ -117,15 +147,16 @@ function parseLocalFallbackAction(transcript, uid) {
                     type: "place",
                     title: name,
                     name,
-                    address,
-                    place_type: lower.includes("school") || text.includes("学校") ? "school" : lower.includes("club") || text.includes("俱乐部") ? "club" : lower.includes("home") || text.includes("家") ? "home" : "other",
+                    address: address || null,
+                    place_type: placeType,
                     missing_fields: address ? [] : ["address"],
                     client_action_id: `local-place-${Date.now()}`,
                 },
             ],
         };
     }
-    const isRequest = /申请|request|ask/i.test(text) && /添加|新增|增加|add|create|save|submit/i.test(text);
+    const isRequest = (/request|ask/i.test(text) || text.includes("\u7533\u8bf7")) &&
+        (/add|create|save|submit/i.test(text) || hasAddKeyword);
     if (isRequest) {
         return {
             intent: "add_request",
@@ -351,14 +382,14 @@ export const commitAiActions = onCall({ region: "us-central1" }, async (request)
         if (type === "homework_task") {
             const items = Array.isArray(action.items) && action.items.length > 0
                 ? action.items
-                : [{ label: "完成作业", item_type: "checkbox", is_required: true }];
+                : [{ label: "瀹屾垚浣滀笟", item_type: "checkbox", is_required: true }];
             items.forEach((item, index) => {
                 const itemRef = db.collection(`families/${familyId}/homework_items`).doc();
                 batch.set(itemRef, {
                     id: itemRef.id,
                     family_id: familyId,
                     homework_task_id: ref.id,
-                    label: item.label ?? "完成作业",
+                    label: item.label ?? "瀹屾垚浣滀笟",
                     item_type: item.item_type ?? "checkbox",
                     is_required: Boolean(item.is_required ?? true),
                     is_done: false,
@@ -443,3 +474,5 @@ export const createMemberLogin = onCall({ region: "us-central1" }, async (reques
     await batch.commit();
     return { ok: true, uid: userRecord.uid, member_id: userRecord.uid };
 });
+export { adminMemberAccountAction, createMemberInvite, bulkMemberInvites, selfRegisterMember, createFamilyAccount, geocodeFamilyPlaces, summarizeLearning, undoFamilyAction } from './firebaseMigrationAdditions.js';
+export { transcribeAudio, generateProgressSummary, generateReportShareVersion, routeLateRiskCheck, routeDepartureAlerts, savePushSubscription, sendFamilyReminders, systemHealthCheck, scheduledFamilyRunner } from './firebaseMigrationPass2.js';

@@ -2,8 +2,6 @@ import { useState } from "react";
 import type { CSSProperties } from "react";
 import type { FamilyData, FamilyMember } from "../../lib/familyDataTypes";
 import { createMemberInvite } from "../../lib/memberSelfRegistration";
-import { supabase } from "../../lib/supabaseClient";
-
 type Props = {
   data: FamilyData;
   member: FamilyMember;
@@ -22,7 +20,7 @@ export function MemberInviteManager({ data, member }: Props) {
     setErrorMessage(null);
 
     try {
-      const result = await createMemberInvite(supabase, {
+      const result = await createMemberInvite({
         familyId: data.family.id,
         memberId: member.id,
         expiresInDays: 14,
