@@ -1,3 +1,6 @@
+import { getApps, initializeApp } from "firebase-admin/app";
+if (!getApps().length)
+    initializeApp();
 import { getAuth } from "firebase-admin/auth";
 import { getFirestore } from "firebase-admin/firestore";
 import { HttpsError, onCall } from "firebase-functions/v2/https";
