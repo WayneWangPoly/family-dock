@@ -1,4 +1,4 @@
-import OpenAI from "openai"; import { getApps, initializeApp } from "firebase-admin/app"; if (!getApps().length) initializeApp(); ﻿import { getAuth } from "firebase-admin/auth";
+import OpenAI, { toFile } from "openai"; import { getApps, initializeApp } from "firebase-admin/app"; if (!getApps().length) initializeApp(); ﻿import { getAuth } from "firebase-admin/auth";
 import { getFirestore } from "firebase-admin/firestore";
 import { HttpsError, onCall } from "firebase-functions/v2/https"; import { defineSecret } from "firebase-functions/params";
 
@@ -22,13 +22,110 @@ function isoNow() { return new Date().toISOString(); }
 function cleanFamilyId(value: unknown) { const familyId = String(value ?? "").trim(); if (!familyId) throw new HttpsError("invalid-argument", "family_id is required."); return familyId; }
 function safeText(value: unknown, fallback = "") { return String(value ?? fallback).trim(); }
 
-export const transcribeAudio = onCall({ region: "us-central1" }, async (request) => {
-  assertAuthed(request.auth?.uid);
-  const size = String(request.data?.audio_base64 ?? "").length;
-  return { ok: true, text: "", size, message: "Audio reached Firebase. Add server-side speech-to-text provider to enable transcription." };
-});
+export const transcribeAudio = onCall({ region: "us-central1", secrets: [openAiApiKey] }, async (request) => {
+  const uid = assertAuthed(request.auth?.uid);
+  const apiKey = openAiApiKey.value();
 
-export const generateProgressSummary = onCall({ region: "us-central1", secrets: [openAiApiKey] }, async (request) => {
+  if (!apiKey) {
+    throw new HttpsError("failed-precondition", "OPENAI_API_KEY secret is missing.");
+  }
+
+  const audioBase64 = safeText(request.data?.audio_base64);
+  const mimeType = safeText(request.data?.mime_type, "audio/webm").toLowerCase();
+  const originalFilename = safeText(request.data?.filename, "family-dock-voice.webm");
+
+  if (!audioBase64) {
+    throw new HttpsError("invalid-argument", "audio_base64 is required.");
+  }
+
+  const cleaned = audioBase64.includes(",") ? audioBase64.split(",").pop() ?? "" : audioBase64;
+  const audioBuffer = Buffer.from(cleaned, "base64");
+
+  if (!audioBuffer.length) {
+    throw new HttpsError("invalid-argument", "Audio payload is empty.");
+  }
+
+  const maxBytes = 8 * 1024 * 1024;
+  if (audioBuffer.byteLength > maxBytes) {
+    throw new HttpsError(
+      "invalid-argument",
+      `Audio is too large for callable transcription. Keep recordings under ${Math.round(maxBytes / 1024 / 1024)} MB.`,
+    );
+  }
+
+  const extensionFromMime =
+    mimeType.includes("mp3") ? "mp3" :
+    mimeType.includes("mp4") ? "mp4" :
+    mimeType.includes("mpeg") ? "mpeg" :
+    mimeType.includes("mpga") ? "mpga" :
+    mimeType.includes("m4a") ? "m4a" :
+    mimeType.includes("wav") ? "wav" :
+    mimeType.includes("ogg") ? "ogg" :
+    mimeType.includes("oga") ? "oga" :
+    "webm";
+
+  const safeFilename = originalFilename.includes(".")
+    ? originalFilename.replace(/[^a-zA-Z0-9._-]/g, "-")
+    : `family-dock-voice.${extensionFromMime}`;
+
+  const model = safeText(request.data?.model, "gpt-4o-mini-transcribe");
+  const language = safeText(request.data?.language);
+  const prompt = safeText(
+    request.data?.prompt,
+    "Family schedule, child activities, homework, locations, requests, payments, fencing, school, Adelaide.",
+  );
+
+  try {
+    const client = new OpenAI({ apiKey });
+    const file = await toFile(audioBuffer, safeFilename, {
+      type: mimeType || "audio/webm",
+    });
+
+    const transcription = await client.audio.transcriptions.create({
+      file,
+      model,
+      language: language || undefined,
+      prompt,
+      response_format: "json",
+    });
+
+    const text = String((transcription as { text?: unknown }).text ?? "").trim();
+
+    await db.collection("ai_audio_logs").add({
+      auth_user_id: uid,
+      filename: safeFilename,
+      mime_type: mimeType,
+      size_bytes: audioBuffer.byteLength,
+      model,
+      text_length: text.length,
+      created_at: isoNow(),
+    });
+
+    return {
+      ok: true,
+      text,
+      size: audioBuffer.byteLength,
+      mime_type: mimeType,
+      filename: safeFilename,
+      model,
+    };
+  } catch (error: any) {
+    console.error("transcribeAudio failed", {
+      uid,
+      mime_type: mimeType,
+      filename: safeFilename,
+      size_bytes: audioBuffer.byteLength,
+      message: error?.message ?? String(error),
+      status: error?.status ?? null,
+      code: error?.code ?? null,
+    });
+
+    throw new HttpsError(
+      "internal",
+      `Audio transcription failed: ${String(error?.message ?? error).slice(0, 300)}`,
+    );
+  }
+}); export const generateProgressSummary = onCall({ region: "us-central1", secrets: [openAiApiKey] }, async (request) => {
   const uid = assertAuthed(request.auth?.uid);
   const familyId = cleanFamilyId(request.data?.family_id);
   await assertFamilyMember(familyId, uid);
