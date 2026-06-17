@@ -1,4 +1,4 @@
-import webpush from "web-push"; import OpenAI, { toFile } from "openai"; import { getApps, initializeApp } from "firebase-admin/app"; if (!getApps().length) initializeApp(); ﻿import { getAuth } from "firebase-admin/auth";
+import { logger } from "firebase-functions"; import { onSchedule } from "firebase-functions/v2/scheduler"; import webpush from "web-push"; import OpenAI, { toFile } from "openai"; import { getApps, initializeApp } from "firebase-admin/app"; if (!getApps().length) initializeApp(); ﻿import { getAuth } from "firebase-admin/auth";
 import { getFirestore } from "firebase-admin/firestore";
 import { HttpsError, onCall } from "firebase-functions/v2/https"; import { defineSecret } from "firebase-functions/params";
 
@@ -691,3 +691,251 @@ export const scheduledFamilyRunner = onCall({ region: "us-central1" }, async (re
   await ref.set({ id: ref.id, runner_name: "scheduledFamilyRunner", run_mode: safeText(request.data?.mode, "manual"), family_id: familyId, started_at: now, finished_at: now, status: "completed", summary: { ok: true }, error_message: null, created_at: now });
   return { ok: true, log_id: ref.id };
 });
+
+
+type ScheduledJobRunSummary = {
+  job_id: string;
+  job_name: string;
+  family_id: string;
+  trigger_name: string;
+  status: "completed" | "failed" | "skipped";
+  summary: Record<string, unknown>;
+  error_message: string | null;
+};
+
+function getFamilyIdFromScheduledSetting(settingDoc: any, setting: any) {
+  const direct = safeText(setting.family_id);
+  if (direct) return direct;
+  return safeText(settingDoc.ref?.parent?.parent?.id);
+}
+
+function shouldRunScheduledSetting(setting: any, triggerName: "route" | "reminder" | "all") {
+  if (!setting?.is_enabled) return false;
+  const payload = setting.runner_payload ?? {};
+
+  if (triggerName === "route") {
+    return Boolean(payload.run_late_risk || payload.run_route_alerts);
+  }
+
+  if (triggerName === "reminder") {
+    return Boolean(payload.run_family_reminders);
+  }
+
+  return true;
+}
+
+async function runScheduledSetting(settingDoc: any, triggerName: "route" | "reminder" | "all"): Promise<ScheduledJobRunSummary> {
+  const setting = settingDoc.data() ?? {};
+  const familyId = getFamilyIdFromScheduledSetting(settingDoc, setting);
+  const jobName = safeText(setting.job_name, settingDoc.id);
+  const now = isoNow();
+
+  if (!familyId) {
+    return {
+      job_id: settingDoc.id,
+      job_name: jobName,
+      family_id: "",
+      trigger_name: triggerName,
+      status: "skipped",
+      summary: { reason: "Missing family_id on scheduled job setting." },
+      error_message: "Missing family_id.",
+    };
+  }
+
+  if (!shouldRunScheduledSetting(setting, triggerName)) {
+    return {
+      job_id: settingDoc.id,
+      job_name: jobName,
+      family_id: familyId,
+      trigger_name: triggerName,
+      status: "skipped",
+      summary: { reason: "Job disabled or not relevant for this trigger." },
+      error_message: null,
+    };
+  }
+
+  const logRef = db.collection(`families/${familyId}/scheduled_runner_logs`).doc();
+  const payload = setting.runner_payload ?? {};
+  const summary: Record<string, unknown> = {
+    trigger_name: triggerName,
+    runner_payload: payload,
+    scheduled_job_id: settingDoc.id,
+    scheduled_job_name: jobName,
+  };
+
+  try {
+    await logRef.set({
+      id: logRef.id,
+      runner_name: "scheduledFamilyRunner",
+      trigger_name: triggerName,
+      run_mode: "onSchedule",
+      family_id: familyId,
+      job_setting_id: settingDoc.id,
+      job_name: jobName,
+      started_at: now,
+      finished_at: null,
+      status: "running",
+      summary,
+      error_message: null,
+      created_at: now,
+      updated_at: now,
+    });
+
+    if (payload.run_family_reminders) {
+      const pushResult = await sendPushToFamily({
+        familyId,
+        senderUid: "system-scheduler",
+        payload: {
+          notification_type: "scheduled_family_reminder",
+          title: "Family Dock reminder",
+          body: "Scheduled family reminder check completed.",
+          target_url: "/",
+          source_table: "scheduled_job_settings",
+          source_id: settingDoc.id,
+        },
+      });
+
+      summary.family_reminders = pushResult;
+    }
+
+    if (payload.run_route_alerts) {
+      const pushResult = await sendPushToFamily({
+        familyId,
+        senderUid: "system-scheduler",
+        payload: {
+          notification_type: "scheduled_route_check",
+          title: "Family Dock route check",
+          body: "Scheduled route safety check completed. Detailed late-risk logic can be expanded next.",
+          target_url: "/",
+          source_table: "scheduled_job_settings",
+          source_id: settingDoc.id,
+        },
+      });
+
+      summary.route_alerts = pushResult;
+    }
+
+    if (payload.run_late_risk) {
+      summary.late_risk = {
+        checked: true,
+        note: "Scheduled late-risk scan ran. Detailed route-leg scoring can be expanded next.",
+      };
+    }
+
+    const finishedAt = isoNow();
+    await logRef.set({
+      finished_at: finishedAt,
+      status: "completed",
+      summary,
+      error_message: null,
+      updated_at: finishedAt,
+    }, { merge: true });
+
+    await settingDoc.ref.set({
+      last_scheduled_run_at: finishedAt,
+      last_scheduled_result: {
+        status: "completed",
+        log_id: logRef.id,
+        summary,
+      },
+      updated_at: finishedAt,
+    }, { merge: true });
+
+    return {
+      job_id: settingDoc.id,
+      job_name: jobName,
+      family_id: familyId,
+      trigger_name: triggerName,
+      status: "completed",
+      summary,
+      error_message: null,
+    };
+  } catch (error: any) {
+    const message = String(error?.message ?? error).slice(0, 800);
+    const failedAt = isoNow();
+
+    await logRef.set({
+      finished_at: failedAt,
+      status: "failed",
+      summary,
+      error_message: message,
+      updated_at: failedAt,
+    }, { merge: true });
+
+    await settingDoc.ref.set({
+      last_scheduled_run_at: failedAt,
+      last_scheduled_result: {
+        status: "failed",
+        log_id: logRef.id,
+        error_message: message,
+      },
+      updated_at: failedAt,
+    }, { merge: true });
+
+    return {
+      job_id: settingDoc.id,
+      job_name: jobName,
+      family_id: familyId,
+      trigger_name: triggerName,
+      status: "failed",
+      summary,
+      error_message: message,
+    };
+  }
+}
+
+async function runScheduledFamilySettings(triggerName: "route" | "reminder" | "all") {
+  const snap = await db
+    .collectionGroup("scheduled_job_settings")
+    .where("is_enabled", "==", true)
+    .limit(200)
+    .get();
+
+  const results: ScheduledJobRunSummary[] = [];
+
+  for (const settingDoc of snap.docs) {
+    const result = await runScheduledSetting(settingDoc, triggerName);
+    results.push(result);
+  }
+
+  const completed = results.filter((item) => item.status === "completed").length;
+  const failed = results.filter((item) => item.status === "failed").length;
+  const skipped = results.filter((item) => item.status === "skipped").length;
+
+  logger.info("Scheduled Family Dock runner completed", {
+    triggerName,
+    total: results.length,
+    completed,
+    failed,
+    skipped,
+  });
+
+  return { total: results.length, completed, failed, skipped, results };
+}
+
+export const scheduledAfternoonRouteRunner = onSchedule(
+  {
+    schedule: "every 5 minutes",
+    timeZone: "Australia/Adelaide",
+    region: "us-central1",
+    maxInstances: 1,
+    secrets: [vapidPublicKey, vapidPrivateKey, vapidSubject],
+  },
+  async () => {
+    await runScheduledFamilySettings("route");
+  },
+);
+
+export const scheduledFamilyReminderRunner = onSchedule(
+  {
+    schedule: "every 15 minutes",
+    timeZone: "Australia/Adelaide",
+    region: "us-central1",
+    maxInstances: 1,
+    secrets: [vapidPublicKey, vapidPrivateKey, vapidSubject],
+  },
+  async () => {
+    await runScheduledFamilySettings("reminder");
+  },
+);
+
