@@ -157,6 +157,11 @@ service cloud.firestore {
         allow create, update, delete: if isParent(familyId);
       }
 
+      match /route_late_risk_checks/{docId} {
+        allow read: if isMember(familyId);
+        allow create, update, delete: if isParent(familyId);
+      }
+
       match /parent_handoff_messages/{docId} {
         allow read: if isMember(familyId);
         allow create, update, delete: if isParent(familyId);
