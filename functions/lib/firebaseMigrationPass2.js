@@ -785,6 +785,155 @@ function shouldRunScheduledSetting(setting, triggerName) {
     }
     return true;
 }
+function minutesUntilFrom(baseMs, value) {
+    const iso = safeText(value);
+    if (!iso)
+        return null;
+    const time = new Date(iso).getTime();
+    if (!Number.isFinite(time))
+        return null;
+    return Math.round((time - baseMs) / 60000);
+}
+function classifyScheduledRouteRisk(args) {
+    if (args.latestSafe !== null && args.latestSafe < 0)
+        return "late";
+    if (args.latestSafe !== null && args.latestSafe <= 5)
+        return "high";
+    if (args.recommended !== null && args.recommended <= 0)
+        return "high";
+    if (args.recommended !== null && args.recommended <= args.alertMinutesBefore)
+        return "medium";
+    if (args.baseRisk === "high")
+        return "high";
+    if (args.baseRisk === "medium")
+        return "medium";
+    return "normal";
+}
+function buildScheduledRouteRiskMessage(risk, label, minutesToRecommended, minutesToLatestSafe) {
+    if (risk === "late")
+        return `You are late for ${label}. Latest safe departure passed ${Math.abs(minutesToLatestSafe ?? 0)} minute(s) ago.`;
+    if (risk === "high")
+        return `Leave now for ${label}. Latest safe departure is in ${Math.max(minutesToLatestSafe ?? 0, 0)} minute(s).`;
+    if (risk === "medium")
+        return `Prepare to leave for ${label}. Recommended departure is in ${Math.max(minutesToRecommended ?? 0, 0)} minute(s).`;
+    return `Route timing for ${label} looks OK.`;
+}
+async function runScheduledLateRiskScan(familyId) {
+    const now = new Date();
+    const baseMs = now.getTime();
+    const nowIsoValue = now.toISOString();
+    const planSnap = await db
+        .collection(`families/${familyId}/route_departure_plans`)
+        .where("status", "==", "active")
+        .limit(80)
+        .get();
+    const risks = [];
+    let checkedPlans = 0;
+    let checkedLegs = 0;
+    let highOrLate = 0;
+    for (const planDoc of planSnap.docs) {
+        const plan = planDoc.data() ?? {};
+        checkedPlans += 1;
+        const alertMinutesBefore = Math.max(1, Math.min(Number(plan.alert_minutes_before ?? 15) || 15, 120));
+        const legsSnap = await db
+            .collection(`families/${familyId}/route_departure_legs`)
+            .where("plan_id", "==", planDoc.id)
+            .limit(80)
+            .get();
+        let worstRisk = "normal";
+        let worstMessage = "Route timing looks OK.";
+        let worstRecommended = null;
+        let worstLatestSafe = null;
+        let worstLegId = null;
+        const riskRank = { normal: 1, low: 1, medium: 2, high: 3, late: 4 };
+        for (const legDoc of legsSnap.docs) {
+            const leg = legDoc.data() ?? {};
+            checkedLegs += 1;
+            const minutesToRecommended = minutesUntilFrom(baseMs, leg.recommended_departure_at);
+            const minutesToLatestSafe = minutesUntilFrom(baseMs, leg.latest_safe_departure_at);
+            const risk = classifyScheduledRouteRisk({
+                recommended: minutesToRecommended,
+                latestSafe: minutesToLatestSafe,
+                alertMinutesBefore,
+                baseRisk: leg.risk_level,
+            });
+            const label = safeText(leg.to_label, safeText(leg.event_title, "next stop"));
+            const message = buildScheduledRouteRiskMessage(risk, label, minutesToRecommended, minutesToLatestSafe);
+            if ((riskRank[risk] ?? 1) > (riskRank[worstRisk] ?? 1)) {
+                worstRisk = risk;
+                worstMessage = message;
+                worstRecommended = minutesToRecommended;
+                worstLatestSafe = minutesToLatestSafe;
+                worstLegId = legDoc.id;
+            }
+            await legDoc.ref.set({
+                late_risk_level: risk,
+                late_risk_message: message,
+                minutes_to_recommended: minutesToRecommended,
+                minutes_to_latest_safe: minutesToLatestSafe,
+                last_late_risk_check_at: nowIsoValue,
+                updated_at: nowIsoValue,
+            }, { merge: true });
+            if (risk === "medium" || risk === "high" || risk === "late") {
+                if (risk === "high" || risk === "late")
+                    highOrLate += 1;
+                const riskRef = db.collection(`families/${familyId}/route_late_risk_checks`).doc();
+                const row = {
+                    id: riskRef.id,
+                    family_id: familyId,
+                    plan_id: planDoc.id,
+                    leg_id: legDoc.id,
+                    check_time: nowIsoValue,
+                    risk_level: risk,
+                    minutes_to_recommended: minutesToRecommended,
+                    minutes_to_latest_safe: minutesToLatestSafe,
+                    message,
+                    recommendation: risk === "late" || risk === "high" ? "Leave now or adjust pickup plan." : "Get ready to leave soon.",
+                    status: "active",
+                    created_at: nowIsoValue,
+                };
+                await riskRef.set(row);
+                risks.push({
+                    plan_id: planDoc.id,
+                    leg_id: legDoc.id,
+                    risk,
+                    message,
+                    minutes_to_recommended: minutesToRecommended,
+                    minutes_to_latest_safe: minutesToLatestSafe,
+                });
+            }
+        }
+        if (legsSnap.empty) {
+            const minutesToRecommended = minutesUntilFrom(baseMs, plan.recommended_departure_at);
+            const minutesToLatestSafe = minutesUntilFrom(baseMs, plan.latest_safe_departure_at);
+            worstRisk = classifyScheduledRouteRisk({
+                recommended: minutesToRecommended,
+                latestSafe: minutesToLatestSafe,
+                alertMinutesBefore,
+                baseRisk: plan.overall_risk,
+            });
+            worstMessage = buildScheduledRouteRiskMessage(worstRisk, safeText(plan.title, "route plan"), minutesToRecommended, minutesToLatestSafe);
+            worstRecommended = minutesToRecommended;
+            worstLatestSafe = minutesToLatestSafe;
+        }
+        await planDoc.ref.set({
+            late_risk_level: worstRisk,
+            late_risk_message: worstMessage,
+            minutes_to_recommended: worstRecommended,
+            minutes_to_latest_safe: worstLatestSafe,
+            worst_late_risk_leg_id: worstLegId,
+            last_late_risk_check_at: nowIsoValue,
+            updated_at: nowIsoValue,
+        }, { merge: true });
+    }
+    return {
+        checked_plans: checkedPlans,
+        checked_legs: checkedLegs,
+        high_or_late: highOrLate,
+        risks: risks.slice(0, 20),
+        top_risk: risks[0] ?? null,
+    };
+}
 async function runScheduledSetting(settingDoc, triggerName) {
     const setting = settingDoc.data() ?? {};
     const familyId = getFamilyIdFromScheduledSetting(settingDoc, setting);
@@ -852,26 +1001,35 @@ async function runScheduledSetting(settingDoc, triggerName) {
             });
             summary.family_reminders = pushResult;
         }
-        if (payload.run_route_alerts) {
-            const pushResult = await sendPushToFamily({
-                familyId,
-                senderUid: "system-scheduler",
-                payload: {
-                    notification_type: "scheduled_route_check",
-                    title: "Family Dock route check",
-                    body: "Scheduled route safety check completed. Detailed late-risk logic can be expanded next.",
-                    target_url: "/",
-                    source_table: "scheduled_job_settings",
-                    source_id: settingDoc.id,
-                },
-            });
-            summary.route_alerts = pushResult;
+        let lateRiskSummary = null;
+        if (payload.run_late_risk || payload.run_route_alerts) {
+            lateRiskSummary = await runScheduledLateRiskScan(familyId);
+            summary.late_risk = lateRiskSummary;
         }
-        if (payload.run_late_risk) {
-            summary.late_risk = {
-                checked: true,
-                note: "Scheduled late-risk scan ran. Detailed route-leg scoring can be expanded next.",
-            };
+        if (payload.run_route_alerts) {
+            if (lateRiskSummary?.high_or_late > 0 && lateRiskSummary?.top_risk) {
+                const topRisk = lateRiskSummary.top_risk;
+                const pushResult = await sendPushToFamily({
+                    familyId,
+                    senderUid: "system-scheduler",
+                    payload: {
+                        notification_type: `scheduled_route_${topRisk.risk}`,
+                        title: topRisk.risk === "late" ? "Family Dock route is late" : "Family Dock route alert",
+                        body: topRisk.message,
+                        target_url: "/",
+                        source_table: "route_late_risk_checks",
+                        source_id: topRisk.leg_id ?? topRisk.plan_id,
+                    },
+                });
+                summary.route_alerts = pushResult;
+            }
+            else {
+                summary.route_alerts = {
+                    sent: 0,
+                    skipped: 1,
+                    reason: "No high or late route risk found.",
+                };
+            }
         }
         const finishedAt = isoNow();
         await logRef.set({
