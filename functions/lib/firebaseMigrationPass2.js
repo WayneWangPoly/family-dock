@@ -1,11 +1,14 @@
+import OpenAI from "openai";
 import { getApps, initializeApp } from "firebase-admin/app";
 if (!getApps().length)
     initializeApp();
 import { getAuth } from "firebase-admin/auth";
 import { getFirestore } from "firebase-admin/firestore";
 import { HttpsError, onCall } from "firebase-functions/v2/https";
+import { defineSecret } from "firebase-functions/params";
 const db = getFirestore();
 const adminAuth = getAuth();
+const openAiApiKey = defineSecret("OPENAI_API_KEY");
 function assertAuthed(uid) {
     if (!uid)
         throw new HttpsError("unauthenticated", "Login required.");
@@ -29,17 +32,198 @@ export const transcribeAudio = onCall({ region: "us-central1" }, async (request)
     const size = String(request.data?.audio_base64 ?? "").length;
     return { ok: true, text: "", size, message: "Audio reached Firebase. Add server-side speech-to-text provider to enable transcription." };
 });
-export const generateProgressSummary = onCall({ region: "us-central1" }, async (request) => {
+export const generateProgressSummary = onCall({ region: "us-central1", secrets: [openAiApiKey] }, async (request) => {
     const uid = assertAuthed(request.auth?.uid);
     const familyId = cleanFamilyId(request.data?.family_id);
     await assertFamilyMember(familyId, uid);
+    const apiKey = openAiApiKey.value();
+    if (!apiKey) {
+        throw new HttpsError("failed-precondition", "OPENAI_API_KEY secret is missing.");
+    }
     const now = isoNow();
     const childId = safeText(request.data?.child_id) || null;
+    if (!childId)
+        throw new HttpsError("invalid-argument", "child_id is required.");
     const periodStart = safeText(request.data?.period_start, now.slice(0, 10));
     const periodEnd = safeText(request.data?.period_end, periodStart);
     const periodType = safeText(request.data?.period_type, "custom");
     const subject = safeText(request.data?.subject) || null;
-    const title = subject ? `${subject} progress summary` : "Learning progress summary";
+    const language = safeText(request.data?.language, "zh");
+    const familyRef = db.doc(`families/${familyId}`);
+    const childRef = db.doc(`families/${familyId}/members/${childId}`);
+    const [familySnap, childSnap] = await Promise.all([familyRef.get(), childRef.get()]);
+    const family = familySnap.data() ?? {};
+    const child = childSnap.data() ?? {};
+    const childName = safeText(child.display_name, "Child");
+    function inDateRange(value) {
+        const date = String(value ?? "").slice(0, 10);
+        return Boolean(date) && date >= periodStart && date <= periodEnd;
+    }
+    function compactRecord(docSnap) {
+        const row = docSnap.data() ?? {};
+        return {
+            id: docSnap.id,
+            lesson_date: row.lesson_date ?? null,
+            course_name: row.course_name ?? null,
+            lesson_title: row.lesson_title ?? null,
+            child_comment: row.child_comment ?? null,
+            parent_comment: row.parent_comment ?? null,
+            teacher_feedback: row.teacher_feedback ?? null,
+            summary: row.summary ?? null,
+            strengths: Array.isArray(row.strengths) ? row.strengths : [],
+            issues: Array.isArray(row.issues) ? row.issues : [],
+            next_steps: Array.isArray(row.next_steps) ? row.next_steps : [],
+            expectations: Array.isArray(row.expectations) ? row.expectations : [],
+            tags: Array.isArray(row.tags) ? row.tags : [],
+        };
+    }
+    function compactEvent(docSnap) {
+        const row = docSnap.data() ?? {};
+        return {
+            id: docSnap.id,
+            title: row.title ?? null,
+            event_type: row.event_type ?? null,
+            start_at: row.start_at ?? null,
+            end_at: row.end_at ?? null,
+            status: row.status ?? null,
+            teacher_name: row.teacher_name ?? null,
+            place_id: row.place_id ?? null,
+        };
+    }
+    function compactHomework(docSnap, items) {
+        const row = docSnap.data() ?? {};
+        return {
+            id: docSnap.id,
+            title: row.title ?? null,
+            due_at: row.due_at ?? null,
+            status: row.status ?? null,
+            source: row.source ?? null,
+            items,
+        };
+    }
+    const [recordSnap, homeworkSnap, eventSnap] = await Promise.all([
+        db.collection(`families/${familyId}/learning_records`).where("child_id", "==", childId).limit(120).get(),
+        db.collection(`families/${familyId}/homework_tasks`).where("child_id", "==", childId).limit(150).get(),
+        db.collection(`families/${familyId}/events`).where("child_id", "==", childId).limit(160).get(),
+    ]);
+    const records = recordSnap.docs
+        .map(compactRecord)
+        .filter((row) => inDateRange(row.lesson_date))
+        .slice(0, 50);
+    const eventRows = eventSnap.docs
+        .map(compactEvent)
+        .filter((row) => inDateRange(row.start_at))
+        .slice(0, 50);
+    const homeworkDocs = homeworkSnap.docs
+        .filter((docSnap) => {
+        const row = docSnap.data() ?? {};
+        return inDateRange(row.due_at ?? row.created_at ?? row.updated_at);
+    })
+        .slice(0, 50);
+    const homeworkRows = [];
+    for (const taskDoc of homeworkDocs) {
+        const itemsSnap = await db
+            .collection(`families/${familyId}/homework_items`)
+            .where("homework_task_id", "==", taskDoc.id)
+            .limit(30)
+            .get();
+        const items = itemsSnap.docs.map((itemDoc) => {
+            const item = itemDoc.data() ?? {};
+            return {
+                id: itemDoc.id,
+                label: item.label ?? null,
+                item_type: item.item_type ?? null,
+                is_required: Boolean(item.is_required ?? false),
+                is_done: Boolean(item.is_done ?? false),
+                sort_order: Number(item.sort_order ?? 0),
+            };
+        });
+        homeworkRows.push(compactHomework(taskDoc, items));
+    }
+    const evidence = {
+        family: {
+            name: family.name ?? null,
+            timezone: family.timezone ?? "Australia/Adelaide",
+            state_region: family.state_region ?? null,
+            school_level: family.school_level ?? null,
+        },
+        child: {
+            id: childId,
+            display_name: childName,
+            role: child.role ?? null,
+        },
+        period: {
+            type: periodType,
+            start: periodStart,
+            end: periodEnd,
+            subject,
+            language,
+        },
+        learning_records: records,
+        homework_tasks: homeworkRows,
+        calendar_events: eventRows,
+    };
+    const evidenceCount = records.length + homeworkRows.length + eventRows.length;
+    const system = `You are a careful family learning progress assistant.
+Return JSON only. Do not invent facts. Use only the evidence provided.
+The report is for a parent. It should be useful, specific, and balanced.
+If evidence is weak, say so clearly.
+Required JSON fields:
+{
+  "title": string,
+  "executive_summary": string,
+  "narrative_text": string,
+  "strengths": string[],
+  "concerns": string[],
+  "observed_patterns": string[],
+  "recommendations": string[],
+  "parent_actions": string[],
+  "child_actions": string[],
+  "teacher_questions": string[],
+  "next_goals": string[],
+  "missing_evidence": string[],
+  "progress_level": "strong" | "steady" | "mixed" | "needs_attention" | "insufficient_evidence",
+  "confidence": number
+}
+Language target: ${language}.`;
+    const client = new OpenAI({ apiKey });
+    let parsed = null;
+    try {
+        const response = await client.chat.completions.create({
+            model: "gpt-4.1-mini",
+            temperature: 0.2,
+            response_format: { type: "json_object" },
+            messages: [
+                { role: "system", content: system },
+                { role: "user", content: JSON.stringify(evidence).slice(0, 45000) },
+            ],
+        });
+        parsed = JSON.parse(response.choices[0]?.message?.content ?? "{}");
+    }
+    catch (error) {
+        console.error("generateProgressSummary OpenAI failed", {
+            message: error?.message ?? String(error),
+            status: error?.status ?? null,
+            code: error?.code ?? null,
+        });
+        throw new HttpsError("internal", `AI progress summary failed: ${String(error?.message ?? error).slice(0, 300)}`);
+    }
+    function asList(value) {
+        return Array.isArray(value)
+            ? value.map((item) => String(item ?? "").trim()).filter(Boolean).slice(0, 12)
+            : [];
+    }
+    function asText(value, fallback) {
+        const text = String(value ?? "").trim();
+        return text || fallback;
+    }
+    const evidenceBasedConfidence = evidenceCount >= 10 ? 0.82 :
+        evidenceCount >= 5 ? 0.7 :
+            evidenceCount >= 2 ? 0.55 :
+                0.35;
+    const aiConfidence = Number(parsed?.confidence);
+    const confidence = Math.max(0.1, Math.min(0.95, Number.isFinite(aiConfidence) ? aiConfidence : evidenceBasedConfidence));
+    const title = asText(parsed?.title, subject ? `${subject} progress summary` : `${childName} progress summary`);
     const summary = {
         family_id: familyId,
         child_id: childId,
@@ -49,23 +233,33 @@ export const generateProgressSummary = onCall({ region: "us-central1" }, async (
         period_end: periodEnd,
         subject,
         title,
-        executive_summary: "A Firebase-generated draft summary has been created from the selected period. Add richer AI prompting later if needed.",
-        narrative_text: "This draft is stored in Firestore and can be edited, shared or regenerated.",
-        strengths: [],
-        concerns: [],
-        observed_patterns: [],
-        recommendations: ["Review the evidence and add parent notes before sharing."],
-        parent_actions: [],
-        child_actions: [],
-        teacher_questions: [],
-        next_goals: [],
-        missing_evidence: [],
-        summary_json: {},
-        source_note_ids: [],
-        source_homework_ids: [],
-        source_event_ids: [],
-        evidence_count: 0,
-        confidence: 0.5,
+        executive_summary: asText(parsed?.executive_summary, "Not enough evidence to generate a detailed summary yet."),
+        narrative_text: asText(parsed?.narrative_text, "Add more learning notes, homework records and event feedback for a richer progress summary."),
+        strengths: asList(parsed?.strengths),
+        concerns: asList(parsed?.concerns),
+        observed_patterns: asList(parsed?.observed_patterns),
+        recommendations: asList(parsed?.recommendations),
+        parent_actions: asList(parsed?.parent_actions),
+        child_actions: asList(parsed?.child_actions),
+        teacher_questions: asList(parsed?.teacher_questions),
+        next_goals: asList(parsed?.next_goals),
+        missing_evidence: evidenceCount === 0
+            ? ["No learning notes, homework records or calendar events were found for this period."]
+            : asList(parsed?.missing_evidence),
+        summary_json: {
+            ...parsed,
+            progress_level: asText(parsed?.progress_level, evidenceCount < 2 ? "insufficient_evidence" : "mixed"),
+            evidence_counts: {
+                notes: records.length,
+                homework: homeworkRows.length,
+                events: eventRows.length,
+            },
+        },
+        source_note_ids: records.map((row) => row.id),
+        source_homework_ids: homeworkRows.map((row) => row.id),
+        source_event_ids: eventRows.map((row) => row.id),
+        evidence_count: evidenceCount,
+        confidence,
         status: "draft",
         created_at: now,
         updated_at: now,
@@ -76,7 +270,17 @@ export const generateProgressSummary = onCall({ region: "us-central1" }, async (
         id = ref.id;
         await ref.set({ id, ...summary });
     }
-    return { ok: true, saved: request.data?.save !== false, summary: { id, ...summary }, evidence_counts: { notes: 0, homework: 0, events: 0 } };
+    return {
+        ok: true,
+        saved: request.data?.save !== false,
+        model: "gpt-4.1-mini",
+        summary: { id, ...summary },
+        evidence_counts: {
+            notes: records.length,
+            homework: homeworkRows.length,
+            events: eventRows.length,
+        },
+    };
 });
 export const generateReportShareVersion = onCall({ region: "us-central1" }, async (request) => {
     const uid = assertAuthed(request.auth?.uid);
