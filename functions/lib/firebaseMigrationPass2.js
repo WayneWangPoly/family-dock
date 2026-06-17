@@ -1,3 +1,4 @@
+import webpush from "web-push";
 import OpenAI, { toFile } from "openai";
 import { getApps, initializeApp } from "firebase-admin/app";
 if (!getApps().length)
@@ -9,6 +10,9 @@ import { defineSecret } from "firebase-functions/params";
 const db = getFirestore();
 const adminAuth = getAuth();
 const openAiApiKey = defineSecret("OPENAI_API_KEY");
+const vapidPublicKey = defineSecret("VAPID_PUBLIC_KEY");
+const vapidPrivateKey = defineSecret("VAPID_PRIVATE_KEY");
+const vapidSubject = defineSecret("VAPID_SUBJECT");
 function assertAuthed(uid) {
     if (!uid)
         throw new HttpsError("unauthenticated", "Login required.");
@@ -389,11 +393,150 @@ export const routeLateRiskCheck = onCall({ region: "us-central1" }, async (reque
     await logRef.set({ id: logRef.id, runner_name: "routeLateRiskCheck", run_mode: "manual", family_id: familyId, started_at: now, finished_at: now, status: "completed", summary: { checked_plans: 0, checked_legs: 0, high_or_late: 0 }, error_message: null, created_at: now });
     return { ok: true, checked_plans: 0, checked_legs: 0, high_or_late: 0, risks: [] };
 });
-export const routeDepartureAlerts = onCall({ region: "us-central1" }, async (request) => {
+function configureWebPush() {
+    const subject = vapidSubject.value();
+    const publicKey = vapidPublicKey.value();
+    const privateKey = vapidPrivateKey.value();
+    if (!subject || !publicKey || !privateKey) {
+        throw new HttpsError("failed-precondition", "Missing VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY or VAPID_SUBJECT.");
+    }
+    webpush.setVapidDetails(subject, publicKey, privateKey);
+}
+function asWebPushSubscription(row) {
+    const endpoint = safeText(row.endpoint);
+    const keys = row.keys ?? {};
+    const p256dh = safeText(keys.p256dh);
+    const auth = safeText(keys.auth);
+    if (!endpoint || !p256dh || !auth)
+        return null;
+    return {
+        endpoint,
+        keys: { p256dh, auth },
+    };
+}
+async function sendPushToFamily(args) {
+    configureWebPush();
+    const now = isoNow();
+    const snap = await db
+        .collection(`families/${args.familyId}/push_subscriptions`)
+        .where("is_active", "==", true)
+        .limit(200)
+        .get();
+    let sent = 0;
+    let failed = 0;
+    let skipped = 0;
+    const results = [];
+    for (const docSnap of snap.docs) {
+        const row = docSnap.data();
+        const subscription = asWebPushSubscription(row);
+        if (!subscription) {
+            skipped += 1;
+            results.push({ subscription_id: docSnap.id, status: "skipped", error: "Missing endpoint or keys." });
+            continue;
+        }
+        const logRef = db.collection(`families/${args.familyId}/notification_logs`).doc();
+        const message = {
+            title: args.payload.title,
+            body: args.payload.body,
+            target_url: args.payload.target_url ?? "/",
+            notification_type: args.payload.notification_type,
+            family_id: args.familyId,
+            log_id: logRef.id,
+        };
+        try {
+            await webpush.sendNotification(subscription, JSON.stringify(message), { TTL: 3600 });
+            sent += 1;
+            await logRef.set({
+                id: logRef.id,
+                family_id: args.familyId,
+                auth_user_id: row.auth_user_id ?? null,
+                member_id: row.member_id ?? null,
+                subscription_id: docSnap.id,
+                notification_type: args.payload.notification_type,
+                title: args.payload.title,
+                body: args.payload.body,
+                target_url: args.payload.target_url ?? "/",
+                source_table: args.payload.source_table ?? null,
+                source_id: args.payload.source_id ?? null,
+                dedupe_key: null,
+                status: "sent",
+                error_message: null,
+                sent_at: now,
+                read_at: null,
+                archived_at: null,
+                created_by: args.senderUid,
+                created_at: now,
+                updated_at: now,
+            });
+            results.push({ subscription_id: docSnap.id, status: "sent", error: null });
+        }
+        catch (error) {
+            failed += 1;
+            const statusCode = Number(error?.statusCode ?? error?.status ?? 0);
+            const messageText = String(error?.body ?? error?.message ?? error);
+            if (statusCode === 404 || statusCode === 410) {
+                await docSnap.ref.set({
+                    is_active: false,
+                    disabled_at: now,
+                    updated_at: now,
+                    disable_reason: `web-push-${statusCode}`,
+                }, { merge: true });
+            }
+            await logRef.set({
+                id: logRef.id,
+                family_id: args.familyId,
+                auth_user_id: row.auth_user_id ?? null,
+                member_id: row.member_id ?? null,
+                subscription_id: docSnap.id,
+                notification_type: args.payload.notification_type,
+                title: args.payload.title,
+                body: args.payload.body,
+                target_url: args.payload.target_url ?? "/",
+                source_table: args.payload.source_table ?? null,
+                source_id: args.payload.source_id ?? null,
+                dedupe_key: null,
+                status: "failed",
+                error_message: messageText.slice(0, 500),
+                sent_at: null,
+                read_at: null,
+                archived_at: null,
+                created_by: args.senderUid,
+                created_at: now,
+                updated_at: now,
+            });
+            results.push({ subscription_id: docSnap.id, status: "failed", error: messageText.slice(0, 200) });
+        }
+    }
+    return {
+        subscription_count: snap.size,
+        sent,
+        failed,
+        skipped,
+        no_subscription: snap.empty ? 1 : 0,
+        results,
+    };
+}
+export const routeDepartureAlerts = onCall({ region: "us-central1", secrets: [vapidPublicKey, vapidPrivateKey, vapidSubject] }, async (request) => {
     const uid = assertAuthed(request.auth?.uid);
     const familyId = cleanFamilyId(request.data?.family_id);
     await assertFamilyMember(familyId, uid);
-    return { ok: true, plan_count: 0, sent: 0, failed: 0, skipped: 0, no_subscription: 0, results: [] };
+    const sendResult = await sendPushToFamily({
+        familyId,
+        senderUid: uid,
+        payload: {
+            notification_type: "route_departure_alert",
+            title: "Family Dock route check",
+            body: "Route departure alert test completed. Detailed late-risk logic can be expanded next.",
+            target_url: request.data?.target_url ?? "/",
+            source_table: "route_departure_plans",
+            source_id: request.data?.plan_id ?? null,
+        },
+    });
+    return {
+        ok: true,
+        plan_count: 0,
+        ...sendResult,
+    };
 });
 export const savePushSubscription = onCall({ region: "us-central1" }, async (request) => {
     const uid = assertAuthed(request.auth?.uid);
@@ -412,14 +555,28 @@ export const savePushSubscription = onCall({ region: "us-central1" }, async (req
     await ref.set({ id: ref.id, family_id: familyId, auth_user_id: uid, member_id: request.data?.member_id ?? null, endpoint, keys: request.data?.keys ?? {}, user_agent: request.data?.user_agent ?? null, device_label: request.data?.device_label ?? null, is_active: true, last_seen_at: now, created_at: now, updated_at: now }, { merge: true });
     return { ok: true, active: true, id: ref.id };
 });
-export const sendFamilyReminders = onCall({ region: "us-central1" }, async (request) => {
+export const sendFamilyReminders = onCall({ region: "us-central1", secrets: [vapidPublicKey, vapidPrivateKey, vapidSubject] }, async (request) => {
     const uid = assertAuthed(request.auth?.uid);
     const familyId = cleanFamilyId(request.data?.family_id);
     await assertFamilyMember(familyId, uid);
-    const now = isoNow();
-    const ref = db.collection(`families/${familyId}/notification_logs`).doc();
-    await ref.set({ id: ref.id, family_id: familyId, auth_user_id: uid, member_id: null, subscription_id: null, notification_type: safeText(request.data?.mode, "manual_test"), title: "Family Dock reminder check", body: "Reminder check completed in Firebase.", target_url: request.data?.target_url ?? null, source_table: null, source_id: null, dedupe_key: null, status: "sent", error_message: null, sent_at: now, read_at: null, archived_at: null, created_at: now });
-    return { ok: true, sent: 1, failed: 0, skipped: 0 };
+    const mode = safeText(request.data?.mode, "manual_test");
+    const isManual = mode === "manual_test";
+    const sendResult = await sendPushToFamily({
+        familyId,
+        senderUid: uid,
+        payload: {
+            notification_type: mode,
+            title: isManual ? "Family Dock push test" : "Family Dock reminder",
+            body: isManual ? "This is a real Web Push test from Family Dock." : "Family Dock reminder check completed.",
+            target_url: request.data?.target_url ?? "/",
+            source_table: null,
+            source_id: null,
+        },
+    });
+    return {
+        ok: true,
+        ...sendResult,
+    };
 });
 export const systemHealthCheck = onCall({ region: "us-central1" }, async (request) => {
     const uid = assertAuthed(request.auth?.uid);
