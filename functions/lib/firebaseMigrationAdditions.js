@@ -277,33 +277,129 @@ export const geocodeFamilyPlaces = onCall({ region: "us-central1", secrets: [goo
     if (!familyId)
         throw new HttpsError("invalid-argument", "familyId is required.");
     await assertFamilyParent(familyId, uid);
+    const apiKey = googleMapsApiKey.value();
+    if (!apiKey) {
+        throw new HttpsError("failed-precondition", "GOOGLE_MAPS_API_KEY secret is missing.");
+    }
     const placeIds = Array.isArray(request.data?.placeIds ?? request.data?.place_ids)
-        ? (request.data?.placeIds ?? request.data?.place_ids).map(String)
+        ? (request.data?.placeIds ?? request.data?.place_ids).map(String).filter(Boolean)
         : [];
     const geocodeMissingOnly = Boolean(request.data?.geocodeMissingOnly ?? request.data?.geocode_missing_only ?? true);
+    const country = String(request.data?.country ?? "AU").trim() || "AU";
+    const region = String(request.data?.region ?? "au").trim() || "au";
     const placesRef = db.collection(`families/${familyId}/places`);
-    const snap = placeIds.length > 0 ? await Promise.all(placeIds.map((id) => placesRef.doc(id).get())) : (await placesRef.limit(200).get()).docs;
+    const docs = placeIds.length > 0
+        ? await Promise.all(placeIds.map((id) => placesRef.doc(id).get()))
+        : (await placesRef.limit(200).get()).docs;
+    const now = nowIso();
     const updated = [];
-    const apiKey = googleMapsApiKey.value();
-    for (const docSnap of snap) {
-        if (!docSnap.exists)
+    const failed = [];
+    const skipped = [];
+    for (const docSnap of docs) {
+        if (!docSnap.exists) {
+            failed.push({ id: docSnap.id, status: "not_found", error: "Place document does not exist." });
             continue;
-        const place = docSnap.data();
-        if (geocodeMissingOnly && place.lat && place.lng)
+        }
+        const place = docSnap.data() ?? {};
+        const existingLat = place.lat;
+        const existingLng = place.lng;
+        const hasCoordinates = typeof existingLat === "number" && typeof existingLng === "number";
+        if (geocodeMissingOnly && hasCoordinates) {
+            skipped.push({ id: docSnap.id, status: "already_geocoded", lat: existingLat, lng: existingLng });
             continue;
+        }
         const address = String(place.address ?? "").trim();
-        if (!address)
+        const name = String(place.name ?? place.title ?? "").trim();
+        if (!address && !name) {
+            await docSnap.ref.set({
+                geocode_status: "missing_address",
+                geocode_error: "Place has no address or name.",
+                geocode_attempted_at: now,
+                updated_at: now,
+            }, { merge: true });
+            failed.push({ id: docSnap.id, status: "missing_address", error: "Place has no address or name." });
             continue;
-        const url = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(address)}&key=${encodeURIComponent(apiKey)}`;
-        const response = await fetch(url);
-        const json = await response.json();
-        const location = json?.results?.[0]?.geometry?.location;
-        if (!location)
-            continue;
-        await docSnap.ref.set({ lat: location.lat, lng: location.lng, geocoded_at: nowIso(), updated_at: nowIso() }, { merge: true });
-        updated.push({ id: docSnap.id, lat: location.lat, lng: location.lng });
+        }
+        const query = address || name;
+        const url = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(query)}` +
+            `&region=${encodeURIComponent(region)}` +
+            `&components=${encodeURIComponent(`country:${country}`)}` +
+            `&key=${encodeURIComponent(apiKey)}`;
+        try {
+            const response = await fetch(url);
+            if (!response.ok) {
+                const body = await response.text();
+                const errorMessage = `HTTP ${response.status}: ${body.slice(0, 300)}`;
+                await docSnap.ref.set({
+                    geocode_status: "http_error",
+                    geocode_error: errorMessage,
+                    geocode_attempted_at: now,
+                    updated_at: now,
+                }, { merge: true });
+                failed.push({ id: docSnap.id, status: "http_error", error: errorMessage });
+                continue;
+            }
+            const json = await response.json();
+            const status = String(json?.status ?? "UNKNOWN");
+            const apiError = String(json?.error_message ?? "");
+            if (status !== "OK") {
+                const errorMessage = apiError || `Google Geocoding returned ${status}.`;
+                await docSnap.ref.set({
+                    geocode_status: status,
+                    geocode_error: errorMessage,
+                    geocode_attempted_at: now,
+                    updated_at: now,
+                }, { merge: true });
+                failed.push({ id: docSnap.id, status, error: errorMessage });
+                continue;
+            }
+            const first = json?.results?.[0];
+            const location = first?.geometry?.location;
+            if (typeof location?.lat !== "number" || typeof location?.lng !== "number") {
+                await docSnap.ref.set({
+                    geocode_status: "no_location",
+                    geocode_error: "Google returned OK but no numeric location.",
+                    geocode_attempted_at: now,
+                    updated_at: now,
+                }, { merge: true });
+                failed.push({ id: docSnap.id, status: "no_location", error: "Google returned OK but no numeric location." });
+                continue;
+            }
+            const patch = {
+                lat: location.lat,
+                lng: location.lng,
+                formatted_address: String(first.formatted_address ?? ""),
+                geocode_place_id: String(first.place_id ?? ""),
+                geocode_status: "OK",
+                geocode_error: null,
+                geocoded_at: now,
+                geocode_attempted_at: now,
+                updated_at: now,
+            };
+            await docSnap.ref.set(patch, { merge: true });
+            updated.push({ id: docSnap.id, ...patch });
+        }
+        catch (error) {
+            const errorMessage = String(error?.message ?? error);
+            await docSnap.ref.set({
+                geocode_status: "exception",
+                geocode_error: errorMessage.slice(0, 500),
+                geocode_attempted_at: now,
+                updated_at: now,
+            }, { merge: true });
+            failed.push({ id: docSnap.id, status: "exception", error: errorMessage.slice(0, 300) });
+        }
     }
-    return { ok: true, updated };
+    return {
+        ok: failed.length === 0,
+        total: docs.length,
+        updated_count: updated.length,
+        failed_count: failed.length,
+        skipped_count: skipped.length,
+        updated,
+        failed,
+        skipped,
+    };
 });
 export const summarizeLearning = onCall({ region: "us-central1" }, async (request) => {
     const uid = assertAuthed(request.auth?.uid);
