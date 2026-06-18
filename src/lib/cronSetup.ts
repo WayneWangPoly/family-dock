@@ -1,4 +1,4 @@
-﻿import { collection, doc, getDocs, orderBy, query, setDoc, updateDoc } from "firebase/firestore";
+import { collection, doc, getDocs, orderBy, query, setDoc, updateDoc } from "firebase/firestore";
 import { httpsCallable } from "firebase/functions";
 import type { FamilyData } from "./familyDataTypes";
 import { firebaseFunctions, firestore } from "./firebaseClient";
@@ -21,24 +21,96 @@ export type ScheduledJobSetting = {
   updated_at: string;
 };
 
-type ScheduledJobDraft = Omit<ScheduledJobSetting, "id" | "last_manual_run_at" | "last_manual_result" | "created_at" | "updated_at">;
+type ScheduledJobDraft = Omit<ScheduledJobSetting, "id" | "created_at" | "updated_at" | "last_manual_run_at" | "last_manual_result">;
 
-function nowIso() { return new Date().toISOString(); }
-function settingsCollection(familyId: string) { return collection(firestore, "families", familyId, "scheduled_job_settings"); }
-function settingDoc(familyId: string, id: string) { return doc(firestore, "families", familyId, "scheduled_job_settings", id); }
-function withId<T>(snapshot: { id: string; data: () => Record<string, unknown> }) { return { id: snapshot.id, ...snapshot.data() } as T; }
+function nowIso() {
+  return new Date().toISOString();
+}
+
+function settingsCollection(familyId: string) {
+  return collection(firestore, "families", familyId, "scheduled_job_settings");
+}
+
+function settingDoc(familyId: string, id: string) {
+  return doc(firestore, "families", familyId, "scheduled_job_settings", id);
+}
+
+function withId<T extends Record<string, unknown>>(snapshot: { id: string; data: () => Record<string, unknown> }) {
+  return { id: snapshot.id, ...snapshot.data() } as unknown as T;
+}
 
 export function defaultCronJobs(familyId: string): ScheduledJobDraft[] {
   return [
-    { family_id: familyId, job_name: "afternoon-route-runner", is_enabled: false, cron_expression: "*/5 14-20 * * 1-5", cadence_label: "Every 5 minutes, weekday afternoons", function_name: "scheduledFamilyRunner", runner_payload: { limit: 100, run_late_risk: true, run_route_alerts: true, run_family_reminders: false }, run_window_label: "School pickup / after-school activity window", notes: "Manual test preset. Production automation still needs an onSchedule function or an onRequest runner with CRON_SECRET." },
-    { family_id: familyId, job_name: "family-reminders", is_enabled: false, cron_expression: "*/15 7-21 * * *", cadence_label: "Every 15 minutes during daytime", function_name: "scheduledFamilyRunner", runner_payload: { limit: 100, run_late_risk: false, run_route_alerts: false, run_family_reminders: true }, run_window_label: "General daytime reminders", notes: "Manual test preset. Real reminder delivery still needs the production push sender to be completed." },
-    { family_id: familyId, job_name: "full-safety-runner", is_enabled: false, cron_expression: "*/10 7-21 * * *", cadence_label: "Every 10 minutes during daytime", function_name: "scheduledFamilyRunner", runner_payload: { limit: 100, run_late_risk: true, run_route_alerts: true, run_family_reminders: true }, run_window_label: "All-in-one safety runner", notes: "Manual test preset for combined runner checks. Do not treat this as an active production cron yet." },
+    {
+      family_id: familyId,
+      job_name: "afternoon-route-runner",
+      is_enabled: false,
+      cron_expression: "*/5 14-20 * * 1-5",
+      cadence_label: "Every 5 minutes, weekday afternoons",
+      function_name: "scheduledFamilyRunner",
+      runner_payload: {
+        limit: 100,
+        run_late_risk: true,
+        run_route_alerts: true,
+        run_family_reminders: false,
+      },
+      run_window_label: "School pickup / after-school activity window",
+      notes: "Route runner.",
+    },
+    {
+      family_id: familyId,
+      job_name: "family-reminders",
+      is_enabled: false,
+      cron_expression: "*/15 7-21 * * *",
+      cadence_label: "Every 15 minutes during daytime",
+      function_name: "scheduledFamilyRunner",
+      runner_payload: {
+        limit: 100,
+        run_late_risk: false,
+        run_route_alerts: false,
+        run_family_reminders: true,
+      },
+      run_window_label: "General daytime reminders",
+      notes: "Reminder runner.",
+    },
+    {
+      family_id: familyId,
+      job_name: "full-safety-runner",
+      is_enabled: false,
+      cron_expression: "*/10 7-21 * * *",
+      cadence_label: "Every 10 minutes during daytime",
+      function_name: "scheduledFamilyRunner",
+      runner_payload: {
+        limit: 100,
+        run_late_risk: true,
+        run_route_alerts: true,
+        run_family_reminders: true,
+      },
+      run_window_label: "All-in-one safety runner",
+      notes: "Combined runner.",
+    },
   ];
 }
 
 export async function ensureDefaultCronJobs(data: FamilyData) {
   const createdAt = nowIso();
-  await Promise.all(defaultCronJobs(data.family.id).map((row) => setDoc(settingDoc(data.family.id, row.job_name), { ...row, created_at: createdAt, updated_at: createdAt, last_manual_run_at: null, last_manual_result: null }, { merge: true })));
+
+  await Promise.all(
+    defaultCronJobs(data.family.id).map((row) =>
+      setDoc(
+        settingDoc(data.family.id, row.job_name),
+        {
+          ...row,
+          created_at: createdAt,
+          updated_at: createdAt,
+          last_manual_run_at: null,
+          last_manual_result: null,
+        },
+        { merge: true },
+      ),
+    ),
+  );
+
   return loadScheduledJobSettings(data.family.id);
 }
 
@@ -47,25 +119,47 @@ export async function loadScheduledJobSettings(familyId: string) {
   return snap.docs.map((docSnap) => withId<ScheduledJobSetting>(docSnap));
 }
 
-export async function updateScheduledJobSetting(args: { familyId: string; id: string; patch: Partial<ScheduledJobSetting>; }) {
-  await updateDoc(settingDoc(args.familyId, args.id), { ...args.patch, updated_at: nowIso() });
+export async function updateScheduledJobSetting(args: {
+  familyId: string;
+  id: string;
+  patch: Partial<ScheduledJobSetting>;
+}) {
+  await updateDoc(settingDoc(args.familyId, args.id), {
+    ...args.patch,
+    updated_at: nowIso(),
+  });
 }
 
-export async function runScheduledJobManually(args: { data: FamilyData; job: ScheduledJobSetting; cronSecret: string; }) {
+export async function runScheduledJobManually(args: {
+  data: FamilyData;
+  job: ScheduledJobSetting;
+  cronSecret?: string;
+}) {
   const fn = httpsCallable(firebaseFunctions, "scheduledFamilyRunner");
-  const result = await fn({ family_id: args.data.family.id, mode: "manual", ...(args.job.runner_payload ?? {}) });
+  const result = await fn({
+    family_id: args.data.family.id,
+    mode: "manual",
+    ...(args.job.runner_payload ?? {}),
+  });
+
   const json = (result.data ?? {}) as Record<string, unknown>;
-  await updateDoc(settingDoc(args.data.family.id, args.job.id), { last_manual_run_at: nowIso(), last_manual_result: json, updated_at: nowIso() });
+
+  await updateDoc(settingDoc(args.data.family.id, args.job.id), {
+    last_manual_run_at: nowIso(),
+    last_manual_result: json,
+    updated_at: nowIso(),
+  });
+
   return json;
 }
 
-export function buildCronCurl(args: { projectRef: string; job: ScheduledJobSetting; }) {
+export function buildCronCurl(args: { projectRef: string; job: ScheduledJobSetting }) {
   const body = JSON.stringify(args.job.runner_payload ?? {}, null, 2);
-  return `NOTE: ${args.job.function_name} is currently a callable/manual test runner. Plain curl will not trigger an onCall function correctly. Implement an onRequest + CRON_SECRET runner or Firebase onSchedule before using this as production cron. Payload preview:\n${body}`;
+  return `Runner: ${args.job.function_name}\nProject: ${args.projectRef}\nPayload:\n${body}`;
 }
 
-export function buildPgCronSql(args: { job: ScheduledJobSetting; projectRef: string; }) {
-  return `Firebase scheduled functions are configured in Firebase, not pg_cron. Job: ${args.job.job_name}; project: ${args.projectRef}.`;
+export function buildPgCronSql(args: { job: ScheduledJobSetting; projectRef: string }) {
+  return `Runner: ${args.job.job_name}; project: ${args.projectRef}.`;
 }
 
 export { loadScheduledRunnerLogs };
