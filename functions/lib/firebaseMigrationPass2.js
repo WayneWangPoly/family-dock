@@ -1481,21 +1481,26 @@ export const sendFamilyReminders = onCall({ region: "us-central1", secrets: [vap
     await assertFamilyMember(familyId, uid);
     const mode = safeText(request.data?.mode, "manual_test");
     const isManual = mode === "manual_test";
-    const sendResult = await sendPushToFamily({
-        familyId,
-        senderUid: uid,
-        payload: {
-            notification_type: mode,
-            title: isManual ? "Family Dock push test" : "Family Dock reminder",
-            body: isManual ? "This is a real Web Push test from Family Dock." : "Family Dock reminder check completed.",
-            target_url: request.data?.target_url ?? "/",
-            source_table: null,
-            source_id: null,
-        },
-    });
+    if (isManual) {
+        const sendResult = await sendPushToFamily({
+            familyId,
+            senderUid: uid,
+            payload: {
+                notification_type: "manual_push_test",
+                title: "Family Dock push test",
+                body: "This is a real Web Push test from Family Dock.",
+                target_url: request.data?.target_url ?? "/",
+                source_table: null,
+                source_id: null,
+            },
+        });
+        return { ok: true, mode: "manual_test", ...sendResult };
+    }
+    const reminderResult = await runFamilyReminderScan(familyId, uid);
     return {
         ok: true,
-        ...sendResult,
+        mode: "manual_family_reminder_scan",
+        ...reminderResult,
     };
 });
 export const systemHealthCheck = onCall({ region: "us-central1" }, async (request) => {
