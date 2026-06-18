@@ -433,6 +433,354 @@ Language target: ${language}.`;
   return { ok: true, saved: request.data?.save !== false, share: { id, ...share } };
 });
 
+
+function adelaideDateString(date = new Date()) {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Australia/Adelaide",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(date);
+
+  const year = parts.find((part) => part.type === "year")?.value ?? "1970";
+  const month = parts.find((part) => part.type === "month")?.value ?? "01";
+  const day = parts.find((part) => part.type === "day")?.value ?? "01";
+
+  return `${year}-${month}-${day}`;
+}
+
+function addDaysToDateString(dateString: string, days: number) {
+  const date = new Date(`${dateString}T00:00:00.000Z`);
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
+}
+
+function minutesBeforeIso(iso: string, minutes: number) {
+  const time = new Date(iso).getTime();
+  if (!Number.isFinite(time)) return null;
+  return new Date(time - minutes * 60 * 1000).toISOString();
+}
+
+function routeDocIdPart(value: unknown) {
+  const raw = String(value ?? "unknown").trim() || "unknown";
+  return raw.replace(/[^a-zA-Z0-9_-]/g, "-").slice(0, 80);
+}
+
+function numericCoordinate(value: unknown) {
+  const num = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(num) ? num : null;
+}
+
+function haversineKm(fromLat: number, fromLng: number, toLat: number, toLng: number) {
+  const radiusKm = 6371;
+  const toRad = (value: number) => (value * Math.PI) / 180;
+  const dLat = toRad(toLat - fromLat);
+  const dLng = toRad(toLng - fromLng);
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(fromLat)) * Math.cos(toRad(toLat)) * Math.sin(dLng / 2) ** 2;
+  return 2 * radiusKm * Math.asin(Math.sqrt(a));
+}
+
+function estimateTravelMinutes(args: {
+  fromPlace: any;
+  toPlace: any;
+  defaultTravelMinutes: number;
+}) {
+  const fromLat = numericCoordinate(args.fromPlace?.lat);
+  const fromLng = numericCoordinate(args.fromPlace?.lng);
+  const toLat = numericCoordinate(args.toPlace?.lat);
+  const toLng = numericCoordinate(args.toPlace?.lng);
+
+  if (fromLat === null || fromLng === null || toLat === null || toLng === null) {
+    return {
+      travel_minutes: args.defaultTravelMinutes,
+      distance_km_estimate: null,
+      estimate_method: "default_no_coordinates",
+    };
+  }
+
+  const distanceKm = haversineKm(fromLat, fromLng, toLat, toLng);
+  const drivingMultiplier = 1.35;
+  const averageKmh = 32;
+  const rawMinutes = Math.ceil((distanceKm * drivingMultiplier / averageKmh) * 60) + 5;
+  const travelMinutes = Math.max(8, Math.min(rawMinutes, 120));
+
+  return {
+    travel_minutes: travelMinutes,
+    distance_km_estimate: Math.round(distanceKm * 10) / 10,
+    estimate_method: "coordinate_estimate",
+  };
+}
+
+async function loadPlaceMap(familyId: string, placeIds: string[]) {
+  const uniqueIds = Array.from(new Set(placeIds.filter(Boolean)));
+  const map = new Map<string, any>();
+
+  for (const placeId of uniqueIds) {
+    const snap = await db.doc(`families/${familyId}/places/${placeId}`).get();
+    if (snap.exists) {
+      map.set(placeId, { id: snap.id, ...(snap.data() ?? {}) });
+    }
+  }
+
+  return map;
+}
+
+async function buildDailyRouteDeparturePlansInternal(args: {
+  familyId: string;
+  date: string;
+  createdBy: string;
+  childId?: string | null;
+  defaultTravelMinutes?: number;
+  bufferMinutes?: number;
+  alertMinutesBefore?: number;
+}) {
+  const now = isoNow();
+  const date = safeText(args.date, adelaideDateString());
+  const nextDate = addDaysToDateString(date, 1);
+  const defaultTravelMinutes = Math.max(5, Math.min(Number(args.defaultTravelMinutes ?? 25) || 25, 120));
+  const bufferMinutes = Math.max(0, Math.min(Number(args.bufferMinutes ?? 10) || 10, 60));
+  const alertMinutesBefore = Math.max(1, Math.min(Number(args.alertMinutesBefore ?? 15) || 15, 120));
+
+  const eventsSnap = await db
+    .collection(`families/${args.familyId}/events`)
+    .where("start_at", ">=", date)
+    .where("start_at", "<", nextDate)
+    .limit(300)
+    .get();
+
+  const rawEvents = eventsSnap.docs
+    .map((docSnap) => {
+      const row = docSnap.data() ?? {};
+      return {
+        id: docSnap.id,
+        title: safeText(row.title, "Event"),
+        child_id: safeText(row.child_id) || "family",
+        place_id: safeText(row.place_id),
+        start_at: safeText(row.start_at),
+        end_at: safeText(row.end_at),
+        status: safeText(row.status, "scheduled"),
+        event_type: safeText(row.event_type, "event"),
+      };
+    })
+    .filter((event) => {
+      if (!event.start_at || !event.place_id) return false;
+      if (event.start_at.slice(0, 10) !== date) return false;
+      if (["cancelled", "canceled", "deleted"].includes(event.status.toLowerCase())) return false;
+      if (args.childId && event.child_id !== args.childId) return false;
+      return true;
+    });
+
+  const placeMap = await loadPlaceMap(args.familyId, rawEvents.map((event) => event.place_id));
+  const usableEvents = rawEvents
+    .filter((event) => placeMap.has(event.place_id))
+    .sort((a, b) => a.start_at.localeCompare(b.start_at));
+
+  const byChild = new Map<string, typeof usableEvents>();
+  for (const event of usableEvents) {
+    const list = byChild.get(event.child_id) ?? [];
+    list.push(event);
+    byChild.set(event.child_id, list);
+  }
+
+  let createdPlans = 0;
+  let createdLegs = 0;
+  let skippedChildren = 0;
+  const results: any[] = [];
+  const batch = db.batch();
+
+  for (const [childId, events] of byChild.entries()) {
+    const placeEvents = events.filter((event) => event.place_id);
+    if (placeEvents.length < 2) {
+      skippedChildren += 1;
+      continue;
+    }
+
+    const legs: any[] = [];
+
+    for (let index = 1; index < placeEvents.length; index += 1) {
+      const fromEvent = placeEvents[index - 1];
+      const toEvent = placeEvents[index];
+
+      if (fromEvent.place_id === toEvent.place_id) continue;
+
+      const fromPlace = placeMap.get(fromEvent.place_id);
+      const toPlace = placeMap.get(toEvent.place_id);
+      if (!fromPlace || !toPlace) continue;
+
+      const estimate = estimateTravelMinutes({ fromPlace, toPlace, defaultTravelMinutes });
+      const latestSafeDepartureAt = minutesBeforeIso(toEvent.start_at, estimate.travel_minutes);
+      const recommendedDepartureAt = minutesBeforeIso(toEvent.start_at, estimate.travel_minutes + bufferMinutes);
+
+      if (!latestSafeDepartureAt || !recommendedDepartureAt) continue;
+
+      legs.push({
+        index,
+        fromEvent,
+        toEvent,
+        fromPlace,
+        toPlace,
+        ...estimate,
+        latest_safe_departure_at: latestSafeDepartureAt,
+        recommended_departure_at: recommendedDepartureAt,
+      });
+    }
+
+    if (legs.length === 0) {
+      skippedChildren += 1;
+      continue;
+    }
+
+    const planId = `daily-${routeDocIdPart(date)}-${routeDocIdPart(childId)}`;
+    const planRef = db.doc(`families/${args.familyId}/route_departure_plans/${planId}`);
+
+    const oldLegsSnap = await db
+      .collection(`families/${args.familyId}/route_departure_legs`)
+      .where("plan_id", "==", planId)
+      .limit(100)
+      .get();
+
+    oldLegsSnap.docs.forEach((docSnap) => batch.delete(docSnap.ref));
+
+    const firstEvent = placeEvents[0];
+    const lastEvent = placeEvents[placeEvents.length - 1];
+
+    const planRecommended = legs
+      .map((leg) => leg.recommended_departure_at)
+      .sort()[0] ?? null;
+
+    const planLatestSafe = legs
+      .map((leg) => leg.latest_safe_departure_at)
+      .sort()[0] ?? null;
+
+    batch.set(planRef, {
+      id: planId,
+      family_id: args.familyId,
+      child_id: childId === "family" ? null : childId,
+      date,
+      title: `Daily route plan - ${date}`,
+      status: "active",
+      source: "daily_route_builder",
+      route_mode: "driving_estimate",
+      event_ids: placeEvents.map((event) => event.id),
+      start_at: firstEvent.start_at,
+      end_at: lastEvent.end_at || lastEvent.start_at,
+      recommended_departure_at: planRecommended,
+      latest_safe_departure_at: planLatestSafe,
+      alert_minutes_before: alertMinutesBefore,
+      default_travel_minutes: defaultTravelMinutes,
+      buffer_minutes: bufferMinutes,
+      overall_risk: "normal",
+      late_risk_level: "normal",
+      late_risk_message: "Daily route plan generated. Waiting for late-risk scan.",
+      generated_at: now,
+      created_by: args.createdBy,
+      updated_at: now,
+      created_at: now,
+    }, { merge: true });
+
+    legs.forEach((leg, legIndex) => {
+      const legId = `${planId}-leg-${String(legIndex + 1).padStart(2, "0")}`;
+      const legRef = db.doc(`families/${args.familyId}/route_departure_legs/${legId}`);
+
+      batch.set(legRef, {
+        id: legId,
+        family_id: args.familyId,
+        plan_id: planId,
+        child_id: childId === "family" ? null : childId,
+        date,
+        status: "active",
+        source: "daily_route_builder",
+        route_mode: "driving_estimate",
+        sort_order: legIndex + 1,
+        from_event_id: leg.fromEvent.id,
+        to_event_id: leg.toEvent.id,
+        from_place_id: leg.fromEvent.place_id,
+        to_place_id: leg.toEvent.place_id,
+        from_label: safeText(leg.fromPlace.name, leg.fromEvent.title),
+        to_label: safeText(leg.toPlace.name, leg.toEvent.title),
+        event_title: leg.toEvent.title,
+        target_start_at: leg.toEvent.start_at,
+        travel_minutes: leg.travel_minutes,
+        buffer_minutes: bufferMinutes,
+        recommended_departure_at: leg.recommended_departure_at,
+        latest_safe_departure_at: leg.latest_safe_departure_at,
+        distance_km_estimate: leg.distance_km_estimate,
+        estimate_method: leg.estimate_method,
+        risk_level: "normal",
+        late_risk_level: "normal",
+        late_risk_message: "Waiting for late-risk scan.",
+        created_by: args.createdBy,
+        created_at: now,
+        updated_at: now,
+      }, { merge: true });
+    });
+
+    createdPlans += 1;
+    createdLegs += legs.length;
+    results.push({
+      plan_id: planId,
+      child_id: childId === "family" ? null : childId,
+      event_count: placeEvents.length,
+      leg_count: legs.length,
+    });
+  }
+
+  if (createdPlans > 0 || createdLegs > 0) {
+    await batch.commit();
+  }
+
+  return {
+    ok: true,
+    date,
+    event_count: rawEvents.length,
+    usable_event_count: usableEvents.length,
+    created_plans: createdPlans,
+    created_legs: createdLegs,
+    skipped_children: skippedChildren,
+    results,
+  };
+}
+
+export const buildDailyRouteDeparturePlans = onCall({ region: "us-central1" }, async (request) => {
+  const uid = assertAuthed(request.auth?.uid);
+  const familyId = cleanFamilyId(request.data?.family_id);
+  await assertFamilyMember(familyId, uid);
+
+  const date = safeText(request.data?.date, adelaideDateString());
+  const childId = safeText(request.data?.child_id) || null;
+
+  const result = await buildDailyRouteDeparturePlansInternal({
+    familyId,
+    date,
+    childId,
+    createdBy: uid,
+    defaultTravelMinutes: Number(request.data?.default_travel_minutes ?? 25) || 25,
+    bufferMinutes: Number(request.data?.buffer_minutes ?? 10) || 10,
+    alertMinutesBefore: Number(request.data?.alert_minutes_before ?? 15) || 15,
+  });
+
+  const logRef = db.collection(`families/${familyId}/scheduled_runner_logs`).doc();
+  const finishedAt = isoNow();
+  await logRef.set({
+    id: logRef.id,
+    runner_name: "buildDailyRouteDeparturePlans",
+    run_mode: safeText(request.data?.mode, "manual"),
+    family_id: familyId,
+    started_at: finishedAt,
+    finished_at: finishedAt,
+    status: "completed",
+    summary: result,
+    error_message: null,
+    created_at: finishedAt,
+    updated_at: finishedAt,
+  });
+
+  return result;
+});
+
+
 export const routeLateRiskCheck = onCall({ region: "us-central1" }, async (request) => {
   const uid = assertAuthed(request.auth?.uid);
   const familyId = cleanFamilyId(request.data?.family_id);

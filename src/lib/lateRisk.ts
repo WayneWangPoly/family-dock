@@ -32,3 +32,27 @@ export function lateRiskTone(risk: string) {
   if (risk === "low") return "success";
   return "info";
 }
+
+export async function buildDailyRouteDeparturePlans(args: {
+  data: FamilyData;
+  date?: string | null;
+  childId?: string | null;
+}) {
+  const fn = httpsCallable(firebaseFunctions, "buildDailyRouteDeparturePlans");
+  const result = await fn({
+    family_id: args.data.family.id,
+    date: args.date ?? new Date().toISOString().slice(0, 10),
+    child_id: args.childId ?? null,
+    mode: "manual",
+  });
+  return result.data as {
+    ok: boolean;
+    date: string;
+    event_count: number;
+    usable_event_count: number;
+    created_plans: number;
+    created_legs: number;
+    skipped_children: number;
+    results: Array<Record<string, unknown>>;
+  };
+}
