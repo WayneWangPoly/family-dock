@@ -27,12 +27,10 @@ export function TruePushPanel({ data, compact }: Props) {
   const [support, setSupport] = useState(() => getPushSupportState());
   const [subscribed, setSubscribed] = useState(false);
   const [busy, setBusy] = useState<BusyAction>(null);
-  const [lastResult, setLastResult] = useState<unknown>(null);
   const { showToast, showError } = useToast();
 
   async function refreshState() {
     setSupport(getPushSupportState());
-
     try {
       const subscription = await getExistingPushSubscription();
       setSubscribed(Boolean(subscription));
@@ -43,17 +41,14 @@ export function TruePushPanel({ data, compact }: Props) {
 
   async function enablePush() {
     setBusy("enable");
-
     try {
-      const result = await subscribeCurrentDevice({
+      await subscribeCurrentDevice({
         familyId: data.family.id,
         memberId: data.role.member_id,
         deviceLabel: "Current device",
       });
-
-      setLastResult(result);
       await refreshState();
-      showToast("Push notifications enabled on this device.", "success");
+      showToast("Push enabled.", "success");
     } catch (error) {
       showError(error);
     } finally {
@@ -63,15 +58,12 @@ export function TruePushPanel({ data, compact }: Props) {
 
   async function disablePush() {
     setBusy("disable");
-
     try {
-      const result = await deactivateCurrentDevicePush({
+      await deactivateCurrentDevicePush({
         familyId: data.family.id,
       });
-
-      setLastResult(result);
       await refreshState();
-      showToast("Push notifications disabled on this device.", "success");
+      showToast("Push disabled.", "success");
     } catch (error) {
       showError(error);
     } finally {
@@ -81,11 +73,9 @@ export function TruePushPanel({ data, compact }: Props) {
 
   async function sendTest() {
     setBusy("test");
-
     try {
-      const result = await sendManualTestPush({ familyId: data.family.id }) as PushActionResult;
-      setLastResult(result);
-      showToast(`Push test logged: ${result.sent ?? 0}`, "success");
+      const result = (await sendManualTestPush({ familyId: data.family.id })) as PushActionResult;
+      showToast(`Test sent: ${result.sent ?? 0}`, "success");
     } catch (error) {
       showError(error);
     } finally {
@@ -95,11 +85,9 @@ export function TruePushPanel({ data, compact }: Props) {
 
   async function runCheck() {
     setBusy("check");
-
     try {
-      const result = await runDueReminderCheck({ familyId: data.family.id }) as PushActionResult;
-      setLastResult(result);
-      showToast(`Reminder check done. Logged ${result.sent ?? 0}.`, "success");
+      const result = (await runDueReminderCheck({ familyId: data.family.id })) as PushActionResult;
+      showToast(`Reminder check: ${result.sent ?? 0}`, "success");
     } catch (error) {
       showError(error);
     } finally {
@@ -114,62 +102,34 @@ export function TruePushPanel({ data, compact }: Props) {
   return (
     <PanelCard>
       <SectionTitle
-        title="True push notifications"
-        subtitle={compact ? "Cross-device push status" : "Push subscription + notification log. Real Web Push sender is pending."}
-        right={<StatusPill label={subscribed ? "subscribed" : "not subscribed"} tone={subscribed ? "success" : "warning"} />}
+        title={compact ? "Push" : "Push notifications"}
+        right={<StatusPill label={subscribed ? "Enabled" : "Off"} tone={subscribed ? "success" : "default"} />}
       />
 
-      {!support.supported && (
-        <div className="fd-alert warning">
-          This browser does not support web push. iPhone requires the app to be installed as a PWA and opened from the home screen.
-        </div>
-      )}
+      {!support.supported && <div className="fd-alert warning">Push is not available on this browser.</div>}
 
       {!compact && (
-        <div className="fd-grid">
-          <div className="fd-card soft">
-            <strong>Permission</strong>
-            <div>{support.permission}</div>
-            <div className="fd-muted">browser notification permission</div>
-          </div>
-
-          <div className="fd-card soft">
-            <strong>Service worker</strong>
-            <div>{support.hasServiceWorker ? "yes" : "no"}</div>
-            <div className="fd-muted">required for push</div>
-          </div>
-
-          <div className="fd-card soft">
-            <strong>Push manager</strong>
-            <div>{support.hasPushManager ? "yes" : "no"}</div>
-            <div className="fd-muted">browser push API</div>
-          </div>
+        <div className="fd-row wrap">
+          <StatusPill label={`Permission: ${support.permission}`} tone={support.permission === "granted" ? "success" : "warning"} />
+          <StatusPill label={`Service worker: ${support.hasServiceWorker ? "yes" : "no"}`} tone={support.hasServiceWorker ? "success" : "warning"} />
+          <StatusPill label={`Push API: ${support.hasPushManager ? "yes" : "no"}`} tone={support.hasPushManager ? "success" : "warning"} />
         </div>
       )}
 
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 12 }}>
-        <button disabled={busy === "enable"} onClick={enablePush} className="fd-button primary">
-          {busy === "enable" ? "Enabling..." : subscribed ? "Refresh subscription" : "Enable push"}
+        <button onClick={enablePush} className="fd-button primary" disabled={!support.supported || busy === "enable"}>
+          {busy === "enable" ? "Enabling..." : subscribed ? "Refresh" : "Enable"}
         </button>
-
-        <button disabled={busy === "disable" || !subscribed} onClick={disablePush} className="fd-button">
-          {busy === "disable" ? "Disabling..." : "Disable this device"}
+        <button onClick={disablePush} className="fd-button" disabled={!subscribed || busy === "disable"}>
+          {busy === "disable" ? "Disabling..." : "Disable"}
         </button>
-
-        <button disabled={busy === "test"} onClick={sendTest} className="fd-button">
-          {busy === "test" ? "Sending..." : "Log push test"}
+        <button onClick={sendTest} className="fd-button" disabled={!subscribed || busy === "test"}>
+          {busy === "test" ? "Sending..." : "Send test"}
         </button>
-
-        <button disabled={busy === "check"} onClick={runCheck} className="fd-button">
-          {busy === "check" ? "Checking..." : "Run reminder check"}
+        <button onClick={runCheck} className="fd-button" disabled={!subscribed || busy === "check"}>
+          {busy === "check" ? "Checking..." : "Check reminders"}
         </button>
       </div>
-
-      {!compact && lastResult !== null && (
-        <pre className="fd-code" style={{ marginTop: 12, whiteSpace: "pre-wrap" }}>
-          {JSON.stringify(lastResult, null, 2)}
-        </pre>
-      )}
     </PanelCard>
   );
 }
