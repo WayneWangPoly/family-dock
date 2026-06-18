@@ -16,13 +16,11 @@ type Props = {
   data: FamilyData;
 };
 
-type BusyAction = "defaults" | string | null;
-
 export function CronSetupPanel({ data }: Props) {
   const [jobs, setJobs] = useState<ScheduledJobSetting[]>([]);
   const [logs, setLogs] = useState<ScheduledRunnerLog[]>([]);
   const [selectedJobId, setSelectedJobId] = useState("");
-  const [busy, setBusy] = useState<BusyAction>(null);
+  const [busy, setBusy] = useState<string | null>(null);
   const { showToast, showError } = useToast();
 
   const selectedJob = jobs.find((job) => job.id === selectedJobId) ?? jobs[0] ?? null;
@@ -77,7 +75,6 @@ export function CronSetupPanel({ data }: Props) {
       await runScheduledJobManually({
         data,
         job,
-        cronSecret: "",
       });
 
       await refresh();
@@ -95,12 +92,10 @@ export function CronSetupPanel({ data }: Props) {
     try {
       const parsed = JSON.parse(value);
       setJobs((prev) =>
-        prev.map((job) =>
-          job.id === selectedJob.id ? { ...job, runner_payload: parsed } : job,
-        ),
+        prev.map((job) => (job.id === selectedJob.id ? { ...job, runner_payload: parsed } : job)),
       );
     } catch {
-      // Keep typing tolerant until blur.
+      // Keep local typing tolerant until blur.
     }
   }
 
