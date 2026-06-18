@@ -54,7 +54,7 @@ export function CronSetupPanel({ data }: Props) {
       const rows = await ensureDefaultCronJobs(data);
       setJobs(rows);
       if (rows[0]) setSelectedJobId(rows[0].id);
-      showToast("Manual runner presets created.", "success");
+      showToast("Scheduled runner presets created.", "success");
     } catch (error) {
       showError(error);
     } finally {
@@ -70,7 +70,7 @@ export function CronSetupPanel({ data }: Props) {
         patch: { is_enabled: !job.is_enabled },
       });
       await refresh();
-      showToast("Manual runner setting updated.", "success");
+      showToast("Scheduled runner setting updated.", "success");
     } catch (error) {
       showError(error);
     }
@@ -91,7 +91,7 @@ export function CronSetupPanel({ data }: Props) {
         cronSecret,
       });
       await refresh();
-      showToast("Manual runner test completed.", "success");
+      showToast("Scheduled runner test completed.", "success");
       console.log("scheduled job result", result);
     } catch (error) {
       showError(error);
@@ -261,7 +261,7 @@ export function CronSetupPanel({ data }: Props) {
       <PanelCard>
         <SectionTitle
           title="Runner logs"
-          subtitle="Manual runner logs and scheduled test records"
+          subtitle="Scheduled runner logs and scheduled test records"
           right={<StatusPill label={`${logs.length} logs`} tone="info" />}
         />
 

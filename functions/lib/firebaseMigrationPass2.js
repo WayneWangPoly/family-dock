@@ -934,6 +934,24 @@ async function runScheduledLateRiskScan(familyId) {
         top_risk: risks[0] ?? null,
     };
 }
+async function hasRecentScheduledRouteNotification(familyId, sourceId, notificationType, cooldownMinutes = 30) {
+    if (!sourceId)
+        return false;
+    const cutoffIso = new Date(Date.now() - cooldownMinutes * 60 * 1000).toISOString();
+    const snap = await db
+        .collection(`families/${familyId}/notification_logs`)
+        .where("source_id", "==", sourceId)
+        .limit(50)
+        .get();
+    return snap.docs.some((docSnap) => {
+        const row = docSnap.data() ?? {};
+        const createdAt = String(row.created_at ?? row.sent_at ?? "");
+        const status = String(row.status ?? "");
+        return (String(row.notification_type ?? "") === notificationType &&
+            createdAt >= cutoffIso &&
+            ["sent", "queued"].includes(status));
+    });
+}
 async function runScheduledSetting(settingDoc, triggerName) {
     const setting = settingDoc.data() ?? {};
     const familyId = getFamilyIdFromScheduledSetting(settingDoc, setting);
@@ -1009,19 +1027,33 @@ async function runScheduledSetting(settingDoc, triggerName) {
         if (payload.run_route_alerts) {
             if (lateRiskSummary?.high_or_late > 0 && lateRiskSummary?.top_risk) {
                 const topRisk = lateRiskSummary.top_risk;
-                const pushResult = await sendPushToFamily({
-                    familyId,
-                    senderUid: "system-scheduler",
-                    payload: {
-                        notification_type: `scheduled_route_${topRisk.risk}`,
-                        title: topRisk.risk === "late" ? "Family Dock route is late" : "Family Dock route alert",
-                        body: topRisk.message,
-                        target_url: "/",
-                        source_table: "route_late_risk_checks",
-                        source_id: topRisk.leg_id ?? topRisk.plan_id,
-                    },
-                });
-                summary.route_alerts = pushResult;
+                const routeSourceId = topRisk.leg_id ?? topRisk.plan_id;
+                const routeNotificationType = `scheduled_route_${topRisk.risk}`;
+                const cooldownActive = await hasRecentScheduledRouteNotification(familyId, routeSourceId, routeNotificationType, 30);
+                if (cooldownActive) {
+                    summary.route_alerts = {
+                        sent: 0,
+                        skipped: 1,
+                        reason: "Cooldown active for this route risk. No duplicate push sent.",
+                        source_id: routeSourceId,
+                        notification_type: routeNotificationType,
+                    };
+                }
+                else {
+                    const pushResult = await sendPushToFamily({
+                        familyId,
+                        senderUid: "system-scheduler",
+                        payload: {
+                            notification_type: routeNotificationType,
+                            title: topRisk.risk === "late" ? "Family Dock route is late" : "Family Dock route alert",
+                            body: topRisk.message,
+                            target_url: "/",
+                            source_table: topRisk.leg_id ? "route_departure_legs" : "route_departure_plans",
+                            source_id: routeSourceId,
+                        },
+                    });
+                    summary.route_alerts = pushResult;
+                }
             }
             else {
                 summary.route_alerts = {
