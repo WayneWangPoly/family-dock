@@ -1956,33 +1956,298 @@ export const sendFamilyReminders = onCall(
     };
   },
 );
-export const systemHealthCheck = onCall({ region: "us-central1" }, async (request) => {
-  const uid = assertAuthed(request.auth?.uid);
-  const familyId = cleanFamilyId(request.data?.family_id);
-  await assertFamilyMember(familyId, uid);
-  const tables = [
-    "members",
-    "places",
-    "events",
-    "route_stops",
-    "homework_tasks",
-    "payments",
-    "requests",
-  ];
-  const result = [];
-  for (const table of tables) {
-    const snap = await db.collection(`families/${familyId}/${table}`).limit(1).get();
-    result.push({ ok: true, table, count: snap.size, error: null });
-  }
-  return {
-    ok: true,
-    checked_at: isoNow(),
-    env: { FIREBASE_PROJECT_ID: Boolean(process.env.GCLOUD_PROJECT) },
-    tables: result,
-    problem_counts: {},
-  };
-});
+export const systemHealthCheck = onCall(
+  {
+    region: "us-central1",
+    secrets: [openAiApiKey, googleMapsApiKey, vapidPublicKey, vapidPrivateKey, vapidSubject],
+  },
+  async (request) => {
+    const uid = assertAuthed(request.auth?.uid);
+    const familyId = cleanFamilyId(request.data?.family_id);
+    await assertFamilyMember(familyId, uid);
 
+    const checkedAt = isoNow();
+    const today = adelaideDateString();
+    const tomorrow = addDaysToDateString(today, 1);
+    const problems: Array<{ level: "info" | "warning" | "error"; code: string; message: string }> = [];
+
+    async function countCollection(path: string, limitCount = 500) {
+      const snap = await db.collection(path).limit(limitCount).get();
+      return {
+        count: snap.size,
+        capped: snap.size >= limitCount,
+      };
+    }
+
+    async function safeCount(path: string, limitCount = 500) {
+      try {
+        return { ok: true, ...(await countCollection(path, limitCount)), error: null };
+      } catch (error: any) {
+        return {
+          ok: false,
+          count: 0,
+          capped: false,
+          error: String(error?.message ?? error).slice(0, 300),
+        };
+      }
+    }
+
+    const collectionNames = [
+      "members",
+      "places",
+      "events",
+      "homework_tasks",
+      "payments",
+      "requests",
+      "push_subscriptions",
+      "notification_logs",
+      "scheduled_job_settings",
+      "scheduled_runner_logs",
+      "route_departure_plans",
+      "route_departure_legs",
+      "route_late_risk_checks",
+      "learning_progress_summaries",
+    ];
+
+    const collectionStatus = [];
+    for (const name of collectionNames) {
+      const status = await safeCount(`families/${familyId}/${name}`);
+      collectionStatus.push({ table: name, ...status });
+      if (!status.ok) {
+        problems.push({
+          level: "error",
+          code: `collection_${name}_read_failed`,
+          message: `Could not read ${name}: ${status.error}`,
+        });
+      }
+    }
+
+    const secrets = {
+      openai_api_key: Boolean(openAiApiKey.value()),
+      google_maps_api_key: Boolean(googleMapsApiKey.value()),
+      vapid_public_key: Boolean(vapidPublicKey.value()),
+      vapid_private_key: Boolean(vapidPrivateKey.value()),
+      vapid_subject: Boolean(vapidSubject.value()),
+    };
+
+    if (!secrets.openai_api_key) {
+      problems.push({
+        level: "warning",
+        code: "missing_openai_api_key",
+        message: "OPENAI_API_KEY is not available to systemHealthCheck.",
+      });
+    }
+
+    if (!secrets.google_maps_api_key) {
+      problems.push({
+        level: "warning",
+        code: "missing_google_maps_api_key",
+        message: "GOOGLE_MAPS_API_KEY is not available to systemHealthCheck.",
+      });
+    }
+
+    if (!secrets.vapid_public_key || !secrets.vapid_private_key || !secrets.vapid_subject) {
+      problems.push({
+        level: "warning",
+        code: "missing_vapid_secret",
+        message: "One or more VAPID secrets are missing.",
+      });
+    }
+
+    const [
+      activePushSnap,
+      scheduledJobsSnap,
+      placesSnap,
+      todayEventsSnap,
+      todayPlansSnap,
+      todayLegsSnap,
+      recentLogsSnap,
+      recentNotificationsSnap,
+    ] = await Promise.all([
+      db.collection(`families/${familyId}/push_subscriptions`).where("is_active", "==", true).limit(50).get(),
+      db.collection(`families/${familyId}/scheduled_job_settings`).where("is_enabled", "==", true).limit(50).get(),
+      db.collection(`families/${familyId}/places`).limit(300).get(),
+      db
+        .collection(`families/${familyId}/events`)
+        .where("start_at", ">=", today)
+        .where("start_at", "<", tomorrow)
+        .limit(200)
+        .get(),
+      db.collection(`families/${familyId}/route_departure_plans`).where("date", "==", today).limit(100).get(),
+      db.collection(`families/${familyId}/route_departure_legs`).where("date", "==", today).limit(200).get(),
+      db.collection(`families/${familyId}/scheduled_runner_logs`).limit(50).get(),
+      db.collection(`families/${familyId}/notification_logs`).limit(50).get(),
+    ]);
+
+    const enabledJobs = scheduledJobsSnap.docs.map((docSnap) => {
+      const row = docSnap.data() ?? {};
+      return {
+        id: docSnap.id,
+        job_name: safeText(row.job_name, docSnap.id),
+        runner_payload: row.runner_payload ?? {},
+      };
+    });
+
+    const enabledRouteJobs = enabledJobs.filter((job) => {
+      const payload = job.runner_payload ?? {};
+      return Boolean(payload.run_route_alerts || payload.run_late_risk);
+    });
+
+    const enabledReminderJobs = enabledJobs.filter((job) => {
+      const payload = job.runner_payload ?? {};
+      return Boolean(payload.run_family_reminders);
+    });
+
+    const places = placesSnap.docs.map((docSnap) => ({ id: docSnap.id, ...(docSnap.data() ?? {}) }));
+    const placesWithCoordinates = places.filter((place: any) => {
+      const lat = numericCoordinate(place.lat);
+      const lng = numericCoordinate(place.lng);
+      return lat !== null && lng !== null;
+    }).length;
+
+    const todayEvents = todayEventsSnap.docs.map((docSnap) => ({ id: docSnap.id, ...(docSnap.data() ?? {}) }));
+    const todayEventsWithPlace = todayEvents.filter((event: any) => safeText(event.place_id)).length;
+
+    const todayLegs = todayLegsSnap.docs.map((docSnap) => ({ id: docSnap.id, ...(docSnap.data() ?? {}) }));
+    const googleRefreshedLegs = todayLegs.filter((leg: any) => {
+      return safeText(leg.estimate_method) === "google_routes_traffic_aware" || safeText(leg.routes_refresh_status) === "ok";
+    }).length;
+
+    let reminderCandidateSummary: {
+      ok: boolean;
+      count: number;
+      top: Array<Record<string, unknown>>;
+      error: string | null;
+    } = { ok: true, count: 0, top: [], error: null };
+
+    try {
+      const candidates = await buildFamilyReminderCandidates(familyId);
+      reminderCandidateSummary = {
+        ok: true,
+        count: candidates.length,
+        top: candidates.slice(0, 5).map((candidate) => ({
+          notification_type: candidate.notification_type,
+          source_table: candidate.source_table,
+          source_id: candidate.source_id,
+          title: candidate.title,
+          priority: candidate.priority,
+        })),
+        error: null,
+      };
+    } catch (error: any) {
+      reminderCandidateSummary = {
+        ok: false,
+        count: 0,
+        top: [],
+        error: String(error?.message ?? error).slice(0, 300),
+      };
+
+      problems.push({
+        level: "warning",
+        code: "reminder_candidate_scan_failed",
+        message: `Could not build reminder candidates: ${reminderCandidateSummary.error}`,
+      });
+    }
+
+    if (activePushSnap.empty) {
+      problems.push({
+        level: "warning",
+        code: "no_active_push_subscription",
+        message: "No active push subscription found for this family.",
+      });
+    }
+
+    if (enabledRouteJobs.length === 0) {
+      problems.push({
+        level: "info",
+        code: "no_enabled_route_job",
+        message: "No enabled route scheduled job was found.",
+      });
+    }
+
+    if (enabledReminderJobs.length === 0) {
+      problems.push({
+        level: "info",
+        code: "no_enabled_reminder_job",
+        message: "No enabled family reminder scheduled job was found.",
+      });
+    }
+
+    if (places.length > 0 && placesWithCoordinates === 0) {
+      problems.push({
+        level: "warning",
+        code: "places_without_coordinates",
+        message: "Places exist but none have numeric lat/lng.",
+      });
+    }
+
+    if (todayEvents.length > 0 && todayEventsWithPlace === 0) {
+      problems.push({
+        level: "warning",
+        code: "today_events_without_places",
+        message: "Today has events, but none have place_id.",
+      });
+    }
+
+    if (todayEventsWithPlace >= 2 && todayPlansSnap.empty) {
+      problems.push({
+        level: "warning",
+        code: "route_builder_not_generating_today_plan",
+        message: "Today has at least two place-linked events but no route departure plan.",
+      });
+    }
+
+    if (todayLegs.length > 0 && googleRefreshedLegs === 0 && secrets.google_maps_api_key) {
+      problems.push({
+        level: "warning",
+        code: "route_legs_not_google_refreshed",
+        message: "Today has route legs but none have Google Routes refresh status.",
+      });
+    }
+
+    const errorCount = problems.filter((problem) => problem.level === "error").length;
+    const warningCount = problems.filter((problem) => problem.level === "warning").length;
+    const score = Math.max(0, 100 - errorCount * 30 - warningCount * 10);
+
+    return {
+      ok: errorCount === 0,
+      checked_at: checkedAt,
+      family_id: familyId,
+      project: {
+        firebase_project_id: process.env.GCLOUD_PROJECT ?? null,
+        region: "us-central1",
+        timezone: "Australia/Adelaide",
+        today,
+      },
+      score,
+      secrets,
+      collections: collectionStatus,
+      push: {
+        active_subscription_count: activePushSnap.size,
+      },
+      scheduler: {
+        enabled_job_count: enabledJobs.length,
+        enabled_route_job_count: enabledRouteJobs.length,
+        enabled_reminder_job_count: enabledReminderJobs.length,
+        recent_log_count: recentLogsSnap.size,
+      },
+      routes: {
+        today_event_count: todayEvents.length,
+        today_events_with_place_count: todayEventsWithPlace,
+        place_count: places.length,
+        places_with_coordinates: placesWithCoordinates,
+        today_plan_count: todayPlansSnap.size,
+        today_leg_count: todayLegs.length,
+        google_refreshed_today_leg_count: googleRefreshedLegs,
+      },
+      reminders: reminderCandidateSummary,
+      notifications: {
+        recent_notification_count: recentNotificationsSnap.size,
+      },
+      problems,
+    };
+  },
+);
 export const scheduledFamilyRunner = onCall({ region: "us-central1" }, async (request) => {
   const uid = assertAuthed(request.auth?.uid);
   const familyId = cleanFamilyId(request.data?.family_id);

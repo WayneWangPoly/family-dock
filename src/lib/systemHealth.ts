@@ -1,56 +1,61 @@
-import { getPushSupportState, getVapidPublicKey } from "./pushNotifications";
-import { getGoogleMapsBrowserKey } from "./googleMaps";
-import { isStandaloneMode } from "./pwaInstall";
+import { httpsCallable } from "firebase/functions";
+import type { FamilyData } from "./familyDataTypes";
+import { firebaseFunctions } from "./firebaseClient";
 
-export type HealthItem = {
-  key: string;
-  label: string;
-  ok: boolean;
-  detail: string;
+export type FamilyDockHealthProblem = {
+  level: "info" | "warning" | "error";
+  code: string;
+  message: string;
 };
 
-export async function buildSystemHealthItems(): Promise<HealthItem[]> {
-  const push = getPushSupportState();
-  const serviceWorkerRegistration = "serviceWorker" in navigator
-    ? await navigator.serviceWorker.getRegistration("/fd-sw.js").catch(() => null)
-    : null;
+export type FamilyDockHealthCheck = {
+  ok: boolean;
+  checked_at: string;
+  family_id: string;
+  score: number;
+  secrets: Record<string, boolean>;
+  collections: Array<{
+    table: string;
+    ok: boolean;
+    count: number;
+    capped: boolean;
+    error: string | null;
+  }>;
+  push: {
+    active_subscription_count: number;
+  };
+  scheduler: {
+    enabled_job_count: number;
+    enabled_route_job_count: number;
+    enabled_reminder_job_count: number;
+    recent_log_count: number;
+  };
+  routes: {
+    today_event_count: number;
+    today_events_with_place_count: number;
+    place_count: number;
+    places_with_coordinates: number;
+    today_plan_count: number;
+    today_leg_count: number;
+    google_refreshed_today_leg_count: number;
+  };
+  reminders: {
+    ok: boolean;
+    count: number;
+    top: Array<Record<string, unknown>>;
+    error: string | null;
+  };
+  notifications: {
+    recent_notification_count: number;
+  };
+  problems: FamilyDockHealthProblem[];
+};
 
-  return [
-    {
-      key: "online",
-      label: "Network",
-      ok: navigator.onLine,
-      detail: navigator.onLine ? "Online" : "Offline",
-    },
-    {
-      key: "standalone",
-      label: "PWA installed",
-      ok: isStandaloneMode(),
-      detail: isStandaloneMode() ? "Running as installed PWA" : "Running in browser tab",
-    },
-    {
-      key: "service-worker",
-      label: "Service worker",
-      ok: Boolean(serviceWorkerRegistration),
-      detail: serviceWorkerRegistration ? "Registered" : "Not registered yet",
-    },
-    {
-      key: "push-support",
-      label: "Push support",
-      ok: push.supported,
-      detail: `Permission: ${push.permission}`,
-    },
-    {
-      key: "vapid",
-      label: "VAPID public key",
-      ok: Boolean(getVapidPublicKey()),
-      detail: getVapidPublicKey() ? "Configured" : "Missing VITE_VAPID_PUBLIC_KEY",
-    },
-    {
-      key: "maps",
-      label: "Google Maps key",
-      ok: Boolean(getGoogleMapsBrowserKey()),
-      detail: getGoogleMapsBrowserKey() ? "Configured" : "Missing VITE_GOOGLE_MAPS_BROWSER_KEY",
-    },
-  ];
+export async function runSystemHealthCheck(data: FamilyData) {
+  const fn = httpsCallable(firebaseFunctions, "systemHealthCheck");
+  const result = await fn({
+    family_id: data.family.id,
+  });
+
+  return result.data as FamilyDockHealthCheck;
 }
