@@ -475,4 +475,4 @@ export const createMemberLogin = onCall({ region: "us-central1" }, async (reques
     return { ok: true, uid: userRecord.uid, member_id: userRecord.uid };
 });
 export { adminMemberAccountAction, createMemberInvite, bulkMemberInvites, selfRegisterMember, createFamilyAccount, geocodeFamilyPlaces, summarizeLearning, undoFamilyAction } from './firebaseMigrationAdditions.js';
-export { transcribeAudio, generateProgressSummary, generateReportShareVersion, routeLateRiskCheck, routeDepartureAlerts, savePushSubscription, sendFamilyReminders, systemHealthCheck, scheduledFamilyRunner, scheduledAfternoonRouteRunner, scheduledFamilyReminderRunner, buildDailyRouteDeparturePlans } from './firebaseMigrationPass2.js';
+export { transcribeAudio, generateProgressSummary, generateReportShareVersion, routeLateRiskCheck, routeDepartureAlerts, savePushSubscription, sendFamilyReminders, systemHealthCheck, scheduledFamilyRunner, scheduledAfternoonRouteRunner, scheduledFamilyReminderRunner, buildDailyRouteDeparturePlans, refreshRouteLegTravelTimes } from './firebaseMigrationPass2.js';

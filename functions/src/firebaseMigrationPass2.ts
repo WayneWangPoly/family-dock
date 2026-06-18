@@ -3,7 +3,7 @@ import { getFirestore } from "firebase-admin/firestore";
 import { HttpsError, onCall } from "firebase-functions/v2/https"; import { defineSecret } from "firebase-functions/params";
 
 const db = getFirestore();
-const adminAuth = getAuth(); const openAiApiKey = defineSecret("OPENAI_API_KEY"); const vapidPublicKey = defineSecret("VAPID_PUBLIC_KEY"); const vapidPrivateKey = defineSecret("VAPID_PRIVATE_KEY"); const vapidSubject = defineSecret("VAPID_SUBJECT");
+const adminAuth = getAuth(); const openAiApiKey = defineSecret("OPENAI_API_KEY"); const vapidPublicKey = defineSecret("VAPID_PUBLIC_KEY"); const vapidPrivateKey = defineSecret("VAPID_PRIVATE_KEY"); const vapidSubject = defineSecret("VAPID_SUBJECT"); const googleMapsApiKey = defineSecret("GOOGLE_MAPS_API_KEY");
 
 function assertAuthed(uid?: string) {
   if (!uid) throw new HttpsError("unauthenticated", "Login required.");
@@ -781,6 +781,303 @@ export const buildDailyRouteDeparturePlans = onCall({ region: "us-central1" }, a
 });
 
 
+
+function durationToSeconds(value: unknown) {
+  const text = String(value ?? "").trim();
+  if (!text) return null;
+  if (text.endsWith("s")) {
+    const seconds = Number(text.slice(0, -1));
+    return Number.isFinite(seconds) ? seconds : null;
+  }
+  const seconds = Number(text);
+  return Number.isFinite(seconds) ? seconds : null;
+}
+
+function futureDepartureTime(value: unknown) {
+  const requestedMs = new Date(String(value ?? "")).getTime();
+  const minMs = Date.now() + 5 * 60 * 1000;
+  const departureMs = Number.isFinite(requestedMs) ? Math.max(requestedMs, minMs) : minMs;
+  return new Date(departureMs).toISOString();
+}
+
+async function computeGoogleRouteForLeg(args: {
+  apiKey: string;
+  fromPlace: any;
+  toPlace: any;
+  departureTime?: string | null;
+}) {
+  const fromLat = numericCoordinate(args.fromPlace?.lat);
+  const fromLng = numericCoordinate(args.fromPlace?.lng);
+  const toLat = numericCoordinate(args.toPlace?.lat);
+  const toLng = numericCoordinate(args.toPlace?.lng);
+
+  if (fromLat === null || fromLng === null || toLat === null || toLng === null) {
+    throw new Error("Missing numeric coordinates for origin or destination place.");
+  }
+
+  const response = await fetch("https://routes.googleapis.com/directions/v2:computeRoutes", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Goog-Api-Key": args.apiKey,
+      "X-Goog-FieldMask": "routes.duration,routes.staticDuration,routes.distanceMeters",
+    },
+    body: JSON.stringify({
+      origin: {
+        location: {
+          latLng: {
+            latitude: fromLat,
+            longitude: fromLng,
+          },
+        },
+      },
+      destination: {
+        location: {
+          latLng: {
+            latitude: toLat,
+            longitude: toLng,
+          },
+        },
+      },
+      travelMode: "DRIVE",
+      routingPreference: "TRAFFIC_AWARE",
+      computeAlternativeRoutes: false,
+      routeModifiers: {
+        avoidTolls: false,
+        avoidHighways: false,
+        avoidFerries: false,
+      },
+      departureTime: futureDepartureTime(args.departureTime),
+      languageCode: "en-AU",
+      units: "METRIC",
+    }),
+  });
+
+  const body = await response.json().catch(async () => {
+    const text = await response.text();
+    return { error: { message: text } };
+  });
+
+  if (!response.ok) {
+    throw new Error(`Google Routes API HTTP ${response.status}: ${JSON.stringify(body).slice(0, 500)}`);
+  }
+
+  const route = body?.routes?.[0];
+  const durationSeconds = durationToSeconds(route?.duration ?? route?.staticDuration);
+  const staticDurationSeconds = durationToSeconds(route?.staticDuration);
+  const distanceMeters = Number(route?.distanceMeters ?? 0);
+
+  if (!durationSeconds || durationSeconds <= 0) {
+    throw new Error(`Google Routes API returned no usable duration: ${JSON.stringify(body).slice(0, 500)}`);
+  }
+
+  return {
+    duration_seconds: durationSeconds,
+    static_duration_seconds: staticDurationSeconds,
+    travel_minutes: Math.max(1, Math.ceil(durationSeconds / 60)),
+    distance_meters: Number.isFinite(distanceMeters) ? distanceMeters : null,
+    distance_km_estimate: Number.isFinite(distanceMeters) ? Math.round((distanceMeters / 1000) * 10) / 10 : null,
+  };
+}
+
+async function refreshRouteLegTravelTimesInternal(args: {
+  familyId: string;
+  date?: string | null;
+  planId?: string | null;
+  limit?: number;
+  allowMissingApiKey?: boolean;
+}) {
+  const apiKey = googleMapsApiKey.value();
+
+  if (!apiKey) {
+    if (args.allowMissingApiKey) {
+      return {
+        ok: false,
+        skipped: true,
+        reason: "GOOGLE_MAPS_API_KEY secret is missing.",
+        updated_legs: 0,
+        failed_legs: 0,
+      };
+    }
+
+    throw new HttpsError("failed-precondition", "GOOGLE_MAPS_API_KEY secret is missing.");
+  }
+
+  const now = isoNow();
+  const date = safeText(args.date, adelaideDateString());
+  const planId = safeText(args.planId);
+  const limit = Math.max(1, Math.min(Number(args.limit ?? 80) || 80, 200));
+
+  let query: any = db.collection(`families/${args.familyId}/route_departure_legs`);
+
+  if (planId) {
+    query = query.where("plan_id", "==", planId);
+  } else {
+    query = query.where("date", "==", date);
+  }
+
+  const legsSnap = await query.limit(limit).get();
+
+  let updatedLegs = 0;
+  let failedLegs = 0;
+  let skippedLegs = 0;
+  const affectedPlanIds = new Set<string>();
+  const failures: Array<{ leg_id: string; error: string }> = [];
+
+  for (const legDoc of legsSnap.docs) {
+    const leg = legDoc.data() ?? {};
+
+    if (String(leg.status ?? "active") !== "active") {
+      skippedLegs += 1;
+      continue;
+    }
+
+    const fromPlaceId = safeText(leg.from_place_id);
+    const toPlaceId = safeText(leg.to_place_id);
+
+    if (!fromPlaceId || !toPlaceId) {
+      skippedLegs += 1;
+      continue;
+    }
+
+    try {
+      const [fromPlaceSnap, toPlaceSnap] = await Promise.all([
+        db.doc(`families/${args.familyId}/places/${fromPlaceId}`).get(),
+        db.doc(`families/${args.familyId}/places/${toPlaceId}`).get(),
+      ]);
+
+      if (!fromPlaceSnap.exists || !toPlaceSnap.exists) {
+        throw new Error("Origin or destination place document not found.");
+      }
+
+      const fromPlace = fromPlaceSnap.data() ?? {};
+      const toPlace = toPlaceSnap.data() ?? {};
+      const route = await computeGoogleRouteForLeg({
+        apiKey,
+        fromPlace,
+        toPlace,
+        departureTime: leg.recommended_departure_at ?? leg.target_start_at ?? null,
+      });
+
+      const bufferMinutes = Math.max(0, Math.min(Number(leg.buffer_minutes ?? 10) || 10, 60));
+      const targetStartAt = safeText(leg.target_start_at);
+      const latestSafeDepartureAt = targetStartAt
+        ? minutesBeforeIso(targetStartAt, route.travel_minutes)
+        : leg.latest_safe_departure_at ?? null;
+      const recommendedDepartureAt = targetStartAt
+        ? minutesBeforeIso(targetStartAt, route.travel_minutes + bufferMinutes)
+        : leg.recommended_departure_at ?? null;
+
+      await legDoc.ref.set({
+        route_mode: "google_routes_traffic_aware",
+        travel_minutes: route.travel_minutes,
+        routes_duration_seconds: route.duration_seconds,
+        routes_static_duration_seconds: route.static_duration_seconds,
+        distance_meters: route.distance_meters,
+        distance_km_estimate: route.distance_km_estimate,
+        estimate_method: "google_routes_traffic_aware",
+        recommended_departure_at: recommendedDepartureAt,
+        latest_safe_departure_at: latestSafeDepartureAt,
+        routes_refresh_status: "ok",
+        routes_error: null,
+        routes_refreshed_at: now,
+        updated_at: now,
+      }, { merge: true });
+
+      affectedPlanIds.add(safeText(leg.plan_id));
+      updatedLegs += 1;
+    } catch (error: any) {
+      const message = String(error?.message ?? error).slice(0, 500);
+      failedLegs += 1;
+      failures.push({ leg_id: legDoc.id, error: message });
+
+      await legDoc.ref.set({
+        routes_refresh_status: "failed",
+        routes_error: message,
+        routes_refreshed_at: now,
+        updated_at: now,
+      }, { merge: true });
+    }
+  }
+
+  for (const affectedPlanId of Array.from(affectedPlanIds).filter(Boolean)) {
+    const planLegsSnap = await db
+      .collection(`families/${args.familyId}/route_departure_legs`)
+      .where("plan_id", "==", affectedPlanId)
+      .limit(100)
+      .get();
+
+    const planLegs = planLegsSnap.docs.map((docSnap) => docSnap.data() ?? {});
+    const recommendedValues = planLegs
+      .map((leg) => safeText(leg.recommended_departure_at))
+      .filter(Boolean)
+      .sort();
+    const latestSafeValues = planLegs
+      .map((leg) => safeText(leg.latest_safe_departure_at))
+      .filter(Boolean)
+      .sort();
+    const totalTravelMinutes = planLegs.reduce((sum, leg) => sum + (Number(leg.travel_minutes ?? 0) || 0), 0);
+
+    await db.doc(`families/${args.familyId}/route_departure_plans/${affectedPlanId}`).set({
+      route_mode: "google_routes_traffic_aware",
+      estimate_method: "google_routes_traffic_aware",
+      recommended_departure_at: recommendedValues[0] ?? null,
+      latest_safe_departure_at: latestSafeValues[0] ?? null,
+      total_travel_minutes: totalTravelMinutes,
+      routes_refreshed_at: now,
+      routes_refresh_status: failedLegs > 0 ? "partial" : "ok",
+      updated_at: now,
+    }, { merge: true });
+  }
+
+  return {
+    ok: failedLegs === 0,
+    date,
+    plan_id: planId || null,
+    checked_legs: legsSnap.size,
+    updated_legs: updatedLegs,
+    failed_legs: failedLegs,
+    skipped_legs: skippedLegs,
+    affected_plan_ids: Array.from(affectedPlanIds).filter(Boolean),
+    failures: failures.slice(0, 20),
+  };
+}
+
+export const refreshRouteLegTravelTimes = onCall(
+  { region: "us-central1", secrets: [googleMapsApiKey] },
+  async (request) => {
+    const uid = assertAuthed(request.auth?.uid);
+    const familyId = cleanFamilyId(request.data?.family_id);
+    await assertFamilyMember(familyId, uid);
+
+    const result = await refreshRouteLegTravelTimesInternal({
+      familyId,
+      date: safeText(request.data?.date) || null,
+      planId: safeText(request.data?.plan_id) || null,
+      limit: Number(request.data?.limit ?? 80) || 80,
+    });
+
+    const finishedAt = isoNow();
+    const logRef = db.collection(`families/${familyId}/scheduled_runner_logs`).doc();
+    await logRef.set({
+      id: logRef.id,
+      runner_name: "refreshRouteLegTravelTimes",
+      run_mode: safeText(request.data?.mode, "manual"),
+      family_id: familyId,
+      started_at: finishedAt,
+      finished_at: finishedAt,
+      status: result.ok ? "completed" : "partial",
+      summary: result,
+      error_message: result.ok ? null : "Some route legs failed to refresh.",
+      created_at: finishedAt,
+      updated_at: finishedAt,
+    });
+
+    return result;
+  },
+);
+
+
 export const routeLateRiskCheck = onCall({ region: "us-central1" }, async (request) => {
   const uid = assertAuthed(request.auth?.uid);
   const familyId = cleanFamilyId(request.data?.family_id);
@@ -1180,6 +1477,260 @@ export const routeDepartureAlerts = onCall(
   return { ok: true, active: true, id: ref.id };
 });
 
+
+function reminderMinutesUntil(value: unknown) {
+  const iso = safeText(value);
+  if (!iso) return null;
+  const time = new Date(iso).getTime();
+  if (!Number.isFinite(time)) return null;
+  return Math.round((time - Date.now()) / 60000);
+}
+
+function reminderDateOnly(value: unknown) {
+  const text = safeText(value);
+  return text ? text.slice(0, 10) : "";
+}
+
+function reminderIsInactiveStatus(value: unknown) {
+  const status = safeText(value).toLowerCase();
+  return ["cancelled", "canceled", "deleted", "archived", "done", "completed", "paid"].includes(status);
+}
+
+function reminderStatusText(value: unknown, fallback = "scheduled") {
+  return safeText(value, fallback).toLowerCase();
+}
+
+async function hasRecentFamilyReminderNotification(
+  familyId: string,
+  sourceId: string | null,
+  notificationType: string,
+  cooldownMinutes = 360,
+) {
+  if (!sourceId) return false;
+
+  const cutoffIso = new Date(Date.now() - cooldownMinutes * 60 * 1000).toISOString();
+  const snap = await db
+    .collection(`families/${familyId}/notification_logs`)
+    .where("source_id", "==", sourceId)
+    .limit(50)
+    .get();
+
+  return snap.docs.some((docSnap) => {
+    const row = docSnap.data() ?? {};
+    const createdAt = String(row.created_at ?? row.sent_at ?? "");
+    const status = String(row.status ?? "");
+    return (
+      String(row.notification_type ?? "") === notificationType &&
+      createdAt >= cutoffIso &&
+      ["sent", "queued"].includes(status)
+    );
+  });
+}
+
+type FamilyReminderCandidate = {
+  notification_type: string;
+  title: string;
+  body: string;
+  target_url: string;
+  source_table: string;
+  source_id: string;
+  priority: number;
+  cooldown_minutes: number;
+};
+
+async function buildFamilyReminderCandidates(familyId: string) {
+  const candidates: FamilyReminderCandidate[] = [];
+  const today = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Australia/Adelaide",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date());
+
+  const [eventsSnap, homeworkSnap, paymentsSnap] = await Promise.all([
+    db.collection(`families/${familyId}/events`).limit(250).get(),
+    db.collection(`families/${familyId}/homework_tasks`).limit(250).get(),
+    db.collection(`families/${familyId}/payments`).limit(250).get(),
+  ]);
+
+  for (const docSnap of eventsSnap.docs) {
+    const row = docSnap.data() ?? {};
+    if (reminderIsInactiveStatus(row.status)) continue;
+
+    const minutes = reminderMinutesUntil(row.start_at);
+    if (minutes === null) continue;
+
+    const title = safeText(row.title, "Upcoming event");
+    const placeLabel = safeText(row.place_label ?? row.location ?? row.place_name);
+    const timeLabel = new Date(String(row.start_at)).toLocaleTimeString("en-AU", {
+      timeZone: "Australia/Adelaide",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+
+    if (minutes >= 0 && minutes <= 90) {
+      candidates.push({
+        notification_type: "event_upcoming_90m",
+        title: "Upcoming family event",
+        body: `${title} starts at ${timeLabel}${placeLabel ? ` at ${placeLabel}` : ""}.`,
+        target_url: "/",
+        source_table: "events",
+        source_id: docSnap.id,
+        priority: 70 - Math.min(minutes, 60),
+        cooldown_minutes: 180,
+      });
+    }
+
+    if (minutes < 0 && minutes >= -30 && reminderStatusText(row.status) === "scheduled") {
+      candidates.push({
+        notification_type: "event_started_recently",
+        title: "Event has started",
+        body: `${title} started ${Math.abs(minutes)} minute(s) ago.`,
+        target_url: "/",
+        source_table: "events",
+        source_id: docSnap.id,
+        priority: 65,
+        cooldown_minutes: 360,
+      });
+    }
+  }
+
+  for (const docSnap of homeworkSnap.docs) {
+    const row = docSnap.data() ?? {};
+    if (reminderIsInactiveStatus(row.status)) continue;
+
+    const dueAt = row.due_at ?? row.due_date ?? null;
+    const minutes = reminderMinutesUntil(dueAt);
+    const dueDate = reminderDateOnly(dueAt);
+    const title = safeText(row.title, "Homework");
+
+    if (minutes !== null && minutes >= 0 && minutes <= 24 * 60) {
+      candidates.push({
+        notification_type: "homework_due_24h",
+        title: "Homework due soon",
+        body: `${title} is due within 24 hours.`,
+        target_url: "/",
+        source_table: "homework_tasks",
+        source_id: docSnap.id,
+        priority: 55,
+        cooldown_minutes: 720,
+      });
+    } else if (dueDate && dueDate < today) {
+      candidates.push({
+        notification_type: "homework_overdue",
+        title: "Homework overdue",
+        body: `${title} is overdue.`,
+        target_url: "/",
+        source_table: "homework_tasks",
+        source_id: docSnap.id,
+        priority: 60,
+        cooldown_minutes: 1440,
+      });
+    }
+  }
+
+  for (const docSnap of paymentsSnap.docs) {
+    const row = docSnap.data() ?? {};
+    if (reminderIsInactiveStatus(row.status)) continue;
+
+    const isPaid = Boolean(row.is_paid ?? row.paid ?? false);
+    if (isPaid) continue;
+
+    const dueAt = row.due_at ?? row.due_date ?? null;
+    const minutes = reminderMinutesUntil(dueAt);
+    const dueDate = reminderDateOnly(dueAt);
+    const label = safeText(row.title ?? row.name ?? row.description, "Payment");
+    const amount = row.amount ?? row.amount_cents ?? null;
+    const amountLabel = typeof amount === "number" && amount > 0
+      ? ` (${amount > 1000 && row.amount_cents ? `$${Math.round(amount) / 100}` : `$${amount}`})`
+      : "";
+
+    if (minutes !== null && minutes >= 0 && minutes <= 48 * 60) {
+      candidates.push({
+        notification_type: "payment_due_48h",
+        title: "Payment due soon",
+        body: `${label}${amountLabel} is due soon.`,
+        target_url: "/",
+        source_table: "payments",
+        source_id: docSnap.id,
+        priority: 50,
+        cooldown_minutes: 1440,
+      });
+    } else if (dueDate && dueDate < today) {
+      candidates.push({
+        notification_type: "payment_overdue",
+        title: "Payment overdue",
+        body: `${label}${amountLabel} appears overdue.`,
+        target_url: "/",
+        source_table: "payments",
+        source_id: docSnap.id,
+        priority: 58,
+        cooldown_minutes: 1440,
+      });
+    }
+  }
+
+  candidates.sort((a, b) => b.priority - a.priority);
+  return candidates.slice(0, 8);
+}
+
+async function runFamilyReminderScan(familyId: string, senderUid: string) {
+  const candidates = await buildFamilyReminderCandidates(familyId);
+
+  let sent = 0;
+  let skippedCooldown = 0;
+  let skippedNoCandidate = candidates.length === 0 ? 1 : 0;
+  const delivered: Array<Record<string, unknown>> = [];
+
+  for (const candidate of candidates) {
+    const cooldownActive = await hasRecentFamilyReminderNotification(
+      familyId,
+      candidate.source_id,
+      candidate.notification_type,
+      candidate.cooldown_minutes,
+    );
+
+    if (cooldownActive) {
+      skippedCooldown += 1;
+      continue;
+    }
+
+    const result = await sendPushToFamily({
+      familyId,
+      senderUid,
+      payload: {
+        notification_type: candidate.notification_type,
+        title: candidate.title,
+        body: candidate.body,
+        target_url: candidate.target_url,
+        source_table: candidate.source_table,
+        source_id: candidate.source_id,
+      },
+    });
+
+    sent += Number(result.sent ?? 0);
+    delivered.push({
+      notification_type: candidate.notification_type,
+      source_table: candidate.source_table,
+      source_id: candidate.source_id,
+      title: candidate.title,
+      sent: result.sent,
+      failed: result.failed,
+      skipped: result.skipped,
+    });
+  }
+
+  return {
+    ok: true,
+    candidate_count: candidates.length,
+    sent,
+    skipped_cooldown: skippedCooldown,
+    skipped_no_candidate: skippedNoCandidate,
+    delivered,
+  };
+}
+
+
 export const sendFamilyReminders = onCall(
   { region: "us-central1", secrets: [vapidPublicKey, vapidPrivateKey, vapidSubject] },
   async (request) => {
@@ -1295,12 +1846,7 @@ function buildScheduledRouteRiskMessage(risk: string, label: string, minutesToRe
 }
 
 async function runScheduledLateRiskScan(familyId: string) {
-  const now = new Date();
-  const baseMs = now.getTime();
-  const nowIsoValue = now.toISOString();
-
-  const planSnap = await db
-    .collection(`families/${familyId}/route_departure_plans`)
+  const now = new Date(); const baseMs = now.getTime(); const nowIsoValue = now.toISOString(); const routeBuildResult = await buildDailyRouteDeparturePlansInternal({ familyId, date: adelaideDateString(now), createdBy: "system-scheduler", defaultTravelMinutes: 25, bufferMinutes: 10, alertMinutesBefore: 15 }); const routeRefreshResult = await refreshRouteLegTravelTimesInternal({ familyId, date: adelaideDateString(now), limit: 80, allowMissingApiKey: true }); const planSnap = await db .collection(`families/${familyId}/route_departure_plans`)
     .where("status", "==", "active")
     .limit(80)
     .get();
@@ -1524,20 +2070,8 @@ async function runScheduledSetting(settingDoc: any, triggerName: "route" | "remi
 
 
     if (payload.run_family_reminders) {
-      const pushResult = await sendPushToFamily({
-        familyId,
-        senderUid: "system-scheduler",
-        payload: {
-          notification_type: "scheduled_family_reminder",
-          title: "Family Dock reminder",
-          body: "Scheduled family reminder check completed.",
-          target_url: "/",
-          source_table: "scheduled_job_settings",
-          source_id: settingDoc.id,
-        },
-      });
-
-      summary.family_reminders = pushResult;
+      const reminderResult = await runFamilyReminderScan(familyId, "system-scheduler");
+      summary.family_reminders = reminderResult;
     }
 
     let lateRiskSummary: any = null;
@@ -1686,13 +2220,13 @@ async function runScheduledFamilySettings(triggerName: "route" | "reminder" | "a
   return { total: results.length, completed, failed, skipped, results };
 }
 
-export const scheduledAfternoonRouteRunner = onSchedule(
+/* scheduledAfternoonRouteRunnerGoogleRoutesBound */ export const scheduledAfternoonRouteRunner = onSchedule(
   {
     schedule: "every 5 minutes",
     timeZone: "Australia/Adelaide",
     region: "us-central1",
     maxInstances: 1,
-    secrets: [vapidPublicKey, vapidPrivateKey, vapidSubject],
+    secrets: [vapidPublicKey, vapidPrivateKey, vapidSubject, googleMapsApiKey],
   },
   async () => {
     await runScheduledFamilySettings("route");
