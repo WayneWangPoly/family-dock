@@ -1,4 +1,6 @@
-import { getApps, initializeApp } from "firebase-admin/app"; if (!getApps().length) initializeApp(); import { getAuth } from "firebase-admin/auth";
+import { getApps, initializeApp } from "firebase-admin/app";
+if (!getApps().length) initializeApp();
+import { getAuth } from "firebase-admin/auth";
 import { getFirestore } from "firebase-admin/firestore";
 import { HttpsError, onCall } from "firebase-functions/v2/https";
 import { defineSecret } from "firebase-functions/params";
@@ -67,7 +69,9 @@ async function createInviteRecord(args: {
   const inviteRef = db.collection(`families/${familyId}/member_invites`).doc();
   const inviteCode = randomInviteCode();
   const baseUrl = String(args.baseUrl ?? "").replace(/\/$/, "");
-  const registrationLink = baseUrl ? `${baseUrl}/register?code=${encodeURIComponent(inviteCode)}` : `/register?code=${encodeURIComponent(inviteCode)}`;
+  const registrationLink = baseUrl
+    ? `${baseUrl}/register?code=${encodeURIComponent(inviteCode)}`
+    : `/register?code=${encodeURIComponent(inviteCode)}`;
   const createdAt = nowIso();
   const invite = {
     id: inviteRef.id,
@@ -89,7 +93,8 @@ export const createMemberInvite = onCall({ region: "us-central1" }, async (reque
   const uid = assertAuthed(request.auth?.uid);
   const familyId = String(request.data?.familyId ?? request.data?.family_id ?? "");
   const memberId = String(request.data?.memberId ?? request.data?.member_id ?? "");
-  if (!familyId || !memberId) throw new HttpsError("invalid-argument", "familyId and memberId are required.");
+  if (!familyId || !memberId)
+    throw new HttpsError("invalid-argument", "familyId and memberId are required.");
   await assertFamilyParent(familyId, uid);
   const result = await createInviteRecord({
     familyId,
@@ -131,7 +136,15 @@ export const bulkMemberInvites = onCall({ region: "us-central1" }, async (reques
         created_at: createdAt,
         updated_at: createdAt,
       });
-      results.push(await createInviteRecord({ familyId, memberId: memberRef.id, baseUrl, expiresInDays, createdBy: uid }));
+      results.push(
+        await createInviteRecord({
+          familyId,
+          memberId: memberRef.id,
+          baseUrl,
+          expiresInDays,
+          createdBy: uid,
+        }),
+      );
     }
   }
 
@@ -139,8 +152,20 @@ export const bulkMemberInvites = onCall({ region: "us-central1" }, async (reques
     const memberSnap = await db.collection(`families/${familyId}/members`).limit(200).get();
     for (const docSnap of memberSnap.docs) {
       const member = docSnap.data();
-      if (!member.auth_user_id && !member.can_login && ["child", "homestay"].includes(String(member.role))) {
-        results.push(await createInviteRecord({ familyId, memberId: docSnap.id, baseUrl, expiresInDays, createdBy: uid }));
+      if (
+        !member.auth_user_id &&
+        !member.can_login &&
+        ["child", "homestay"].includes(String(member.role))
+      ) {
+        results.push(
+          await createInviteRecord({
+            familyId,
+            memberId: docSnap.id,
+            baseUrl,
+            expiresInDays,
+            createdBy: uid,
+          }),
+        );
       }
     }
   }
@@ -149,21 +174,27 @@ export const bulkMemberInvites = onCall({ region: "us-central1" }, async (reques
 });
 
 export const selfRegisterMember = onCall({ region: "us-central1" }, async (request) => {
-  const inviteCode = String(request.data?.inviteCode ?? request.data?.invite_code ?? "").trim().toUpperCase();
-  const email = String(request.data?.email ?? "").trim().toLowerCase();
+  const inviteCode = String(request.data?.inviteCode ?? request.data?.invite_code ?? "")
+    .trim()
+    .toUpperCase();
+  const email = String(request.data?.email ?? "")
+    .trim()
+    .toLowerCase();
   const password = String(request.data?.password ?? "");
   if (!inviteCode || !email || password.length < 8) {
     throw new HttpsError("invalid-argument", "Invite code, email and password are required.");
   }
 
-  const inviteSnap = await db.collectionGroup("member_invites")
+  const inviteSnap = await db
+    .collectionGroup("member_invites")
     .where("invite_code", "==", inviteCode)
     .limit(1)
     .get();
   if (inviteSnap.empty) throw new HttpsError("not-found", "Invite code not found.");
   const inviteDoc = inviteSnap.docs[0];
   const invite = inviteDoc.data();
-  if (invite.used_at) throw new HttpsError("failed-precondition", "Invite code has already been used.");
+  if (invite.used_at)
+    throw new HttpsError("failed-precondition", "Invite code has already been used.");
   if (invite.expires_at && new Date(invite.expires_at).getTime() < Date.now()) {
     throw new HttpsError("deadline-exceeded", "Invite code has expired.");
   }
@@ -186,26 +217,38 @@ export const selfRegisterMember = onCall({ region: "us-central1" }, async (reque
   const batch = db.batch();
   const updatedAt = nowIso();
   const newMemberRef = db.doc(`families/${familyId}/members/${userRecord.uid}`);
-  batch.set(newMemberRef, {
-    ...member,
-    id: userRecord.uid,
-    family_id: familyId,
-    auth_user_id: userRecord.uid,
-    email,
-    can_login: true,
-    active: true,
-    updated_at: updatedAt,
-  }, { merge: true });
+  batch.set(
+    newMemberRef,
+    {
+      ...member,
+      id: userRecord.uid,
+      family_id: familyId,
+      auth_user_id: userRecord.uid,
+      email,
+      can_login: true,
+      active: true,
+      updated_at: updatedAt,
+    },
+    { merge: true },
+  );
   if (memberId !== userRecord.uid) batch.delete(memberRef);
-  batch.set(db.doc(`users/${userRecord.uid}`), {
-    uid: userRecord.uid,
-    email,
-    display_name: member.display_name ?? "Family member",
-    default_family_id: familyId,
-    created_at: updatedAt,
+  batch.set(
+    db.doc(`users/${userRecord.uid}`),
+    {
+      uid: userRecord.uid,
+      email,
+      display_name: member.display_name ?? "Family member",
+      default_family_id: familyId,
+      created_at: updatedAt,
+      updated_at: updatedAt,
+    },
+    { merge: true },
+  );
+  batch.update(inviteDoc.ref, {
+    used_at: updatedAt,
+    used_by: userRecord.uid,
     updated_at: updatedAt,
-  }, { merge: true });
-  batch.update(inviteDoc.ref, { used_at: updatedAt, used_by: userRecord.uid, updated_at: updatedAt });
+  });
   await batch.commit();
 
   return { ok: true, uid: userRecord.uid, familyId, memberId: userRecord.uid };
@@ -229,7 +272,8 @@ export const adminMemberAccountAction = onCall({ region: "us-central1" }, async 
 
   if (action === "reset_password") {
     const newPassword = String(request.data?.newPassword ?? request.data?.new_password ?? "");
-    if (newPassword.length < 8) throw new HttpsError("invalid-argument", "Password must be at least 8 characters.");
+    if (newPassword.length < 8)
+      throw new HttpsError("invalid-argument", "Password must be at least 8 characters.");
     await adminAuth.updateUser(authUid, { password: newPassword });
   } else if (action === "disable") {
     await adminAuth.updateUser(authUid, { disabled: true });
@@ -243,15 +287,27 @@ export const adminMemberAccountAction = onCall({ region: "us-central1" }, async 
 });
 
 export const createFamilyAccount = onCall({ region: "us-central1" }, async (request) => {
-  const email = String(request.data?.parentEmail ?? request.data?.parent_email ?? "").trim().toLowerCase();
+  const email = String(request.data?.parentEmail ?? request.data?.parent_email ?? "")
+    .trim()
+    .toLowerCase();
   const password = String(request.data?.parentPassword ?? request.data?.parent_password ?? "");
-  const parentDisplayName = String(request.data?.parentDisplayName ?? request.data?.parent_display_name ?? "Parent").trim();
-  const familyName = String(request.data?.familyName ?? request.data?.family_name ?? "Family").trim();
+  const parentDisplayName = String(
+    request.data?.parentDisplayName ?? request.data?.parent_display_name ?? "Parent",
+  ).trim();
+  const familyName = String(
+    request.data?.familyName ?? request.data?.family_name ?? "Family",
+  ).trim();
   if (!email || password.length < 8 || !familyName) {
     throw new HttpsError("invalid-argument", "Email, password and family name are required.");
   }
 
-  const userRecord = await adminAuth.createUser({ email, password, displayName: parentDisplayName, emailVerified: false, disabled: false });
+  const userRecord = await adminAuth.createUser({
+    email,
+    password,
+    displayName: parentDisplayName,
+    emailVerified: false,
+    disabled: false,
+  });
   const familyRef = db.collection("families").doc();
   const createdAt = nowIso();
   const batch = db.batch();
@@ -289,164 +345,203 @@ export const createFamilyAccount = onCall({ region: "us-central1" }, async (requ
   return { ok: true, uid: userRecord.uid, familyId: familyRef.id };
 });
 
-export const geocodeFamilyPlaces = onCall({ region: "us-central1", secrets: [googleMapsApiKey] }, async (request) => {
-  const uid = assertAuthed(request.auth?.uid);
-  const familyId = String(request.data?.familyId ?? request.data?.family_id ?? "");
-  if (!familyId) throw new HttpsError("invalid-argument", "familyId is required.");
+export const geocodeFamilyPlaces = onCall(
+  { region: "us-central1", secrets: [googleMapsApiKey] },
+  async (request) => {
+    const uid = assertAuthed(request.auth?.uid);
+    const familyId = String(request.data?.familyId ?? request.data?.family_id ?? "");
+    if (!familyId) throw new HttpsError("invalid-argument", "familyId is required.");
 
-  await assertFamilyParent(familyId, uid);
+    await assertFamilyParent(familyId, uid);
 
-  const apiKey = googleMapsApiKey.value();
-  if (!apiKey) {
-    throw new HttpsError("failed-precondition", "GOOGLE_MAPS_API_KEY secret is missing.");
-  }
-
-  const placeIds = Array.isArray(request.data?.placeIds ?? request.data?.place_ids)
-    ? (request.data?.placeIds ?? request.data?.place_ids).map(String).filter(Boolean)
-    : [];
-
-  const geocodeMissingOnly = Boolean(request.data?.geocodeMissingOnly ?? request.data?.geocode_missing_only ?? true);
-  const country = String(request.data?.country ?? "AU").trim() || "AU";
-  const region = String(request.data?.region ?? "au").trim() || "au";
-
-  const placesRef = db.collection(`families/${familyId}/places`);
-  const docs = placeIds.length > 0
-    ? await Promise.all(placeIds.map((id: string) => placesRef.doc(id).get()))
-    : (await placesRef.limit(200).get()).docs;
-
-  const now = nowIso();
-  const updated: any[] = [];
-  const failed: any[] = [];
-  const skipped: any[] = [];
-
-  for (const docSnap of docs) {
-    if (!docSnap.exists) {
-      failed.push({ id: docSnap.id, status: "not_found", error: "Place document does not exist." });
-      continue;
+    const apiKey = googleMapsApiKey.value();
+    if (!apiKey) {
+      throw new HttpsError("failed-precondition", "GOOGLE_MAPS_API_KEY secret is missing.");
     }
 
-    const place = docSnap.data() ?? {};
-    const existingLat = place.lat;
-    const existingLng = place.lng;
-    const hasCoordinates = typeof existingLat === "number" && typeof existingLng === "number";
+    const placeIds = Array.isArray(request.data?.placeIds ?? request.data?.place_ids)
+      ? (request.data?.placeIds ?? request.data?.place_ids).map(String).filter(Boolean)
+      : [];
 
-    if (geocodeMissingOnly && hasCoordinates) {
-      skipped.push({ id: docSnap.id, status: "already_geocoded", lat: existingLat, lng: existingLng });
-      continue;
-    }
+    const geocodeMissingOnly = Boolean(
+      request.data?.geocodeMissingOnly ?? request.data?.geocode_missing_only ?? true,
+    );
+    const country = String(request.data?.country ?? "AU").trim() || "AU";
+    const region = String(request.data?.region ?? "au").trim() || "au";
 
-    const address = String(place.address ?? "").trim();
-    const name = String(place.name ?? place.title ?? "").trim();
+    const placesRef = db.collection(`families/${familyId}/places`);
+    const docs =
+      placeIds.length > 0
+        ? await Promise.all(placeIds.map((id: string) => placesRef.doc(id).get()))
+        : (await placesRef.limit(200).get()).docs;
 
-    if (!address && !name) {
-      await docSnap.ref.set({
-        geocode_status: "missing_address",
-        geocode_error: "Place has no address or name.",
-        geocode_attempted_at: now,
-        updated_at: now,
-      }, { merge: true });
+    const now = nowIso();
+    const updated: any[] = [];
+    const failed: any[] = [];
+    const skipped: any[] = [];
 
-      failed.push({ id: docSnap.id, status: "missing_address", error: "Place has no address or name." });
-      continue;
-    }
-
-    const query = address || name;
-    const url =
-      `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(query)}` +
-      `&region=${encodeURIComponent(region)}` +
-      `&components=${encodeURIComponent(`country:${country}`)}` +
-      `&key=${encodeURIComponent(apiKey)}`;
-
-    try {
-      const response = await fetch(url);
-
-      if (!response.ok) {
-        const body = await response.text();
-        const errorMessage = `HTTP ${response.status}: ${body.slice(0, 300)}`;
-
-        await docSnap.ref.set({
-          geocode_status: "http_error",
-          geocode_error: errorMessage,
-          geocode_attempted_at: now,
-          updated_at: now,
-        }, { merge: true });
-
-        failed.push({ id: docSnap.id, status: "http_error", error: errorMessage });
+    for (const docSnap of docs) {
+      if (!docSnap.exists) {
+        failed.push({
+          id: docSnap.id,
+          status: "not_found",
+          error: "Place document does not exist.",
+        });
         continue;
       }
 
-      const json: any = await response.json();
-      const status = String(json?.status ?? "UNKNOWN");
-      const apiError = String(json?.error_message ?? "");
+      const place = docSnap.data() ?? {};
+      const existingLat = place.lat;
+      const existingLng = place.lng;
+      const hasCoordinates = typeof existingLat === "number" && typeof existingLng === "number";
 
-      if (status !== "OK") {
-        const errorMessage = apiError || `Google Geocoding returned ${status}.`;
-
-        await docSnap.ref.set({
-          geocode_status: status,
-          geocode_error: errorMessage,
-          geocode_attempted_at: now,
-          updated_at: now,
-        }, { merge: true });
-
-        failed.push({ id: docSnap.id, status, error: errorMessage });
+      if (geocodeMissingOnly && hasCoordinates) {
+        skipped.push({
+          id: docSnap.id,
+          status: "already_geocoded",
+          lat: existingLat,
+          lng: existingLng,
+        });
         continue;
       }
 
-      const first = json?.results?.[0];
-      const location = first?.geometry?.location;
+      const address = String(place.address ?? "").trim();
+      const name = String(place.name ?? place.title ?? "").trim();
 
-      if (typeof location?.lat !== "number" || typeof location?.lng !== "number") {
-        await docSnap.ref.set({
-          geocode_status: "no_location",
-          geocode_error: "Google returned OK but no numeric location.",
-          geocode_attempted_at: now,
-          updated_at: now,
-        }, { merge: true });
+      if (!address && !name) {
+        await docSnap.ref.set(
+          {
+            geocode_status: "missing_address",
+            geocode_error: "Place has no address or name.",
+            geocode_attempted_at: now,
+            updated_at: now,
+          },
+          { merge: true },
+        );
 
-        failed.push({ id: docSnap.id, status: "no_location", error: "Google returned OK but no numeric location." });
+        failed.push({
+          id: docSnap.id,
+          status: "missing_address",
+          error: "Place has no address or name.",
+        });
         continue;
       }
 
-      const patch = {
-        lat: location.lat,
-        lng: location.lng,
-        formatted_address: String(first.formatted_address ?? ""),
-        geocode_place_id: String(first.place_id ?? ""),
-        geocode_status: "OK",
-        geocode_error: null,
-        geocoded_at: now,
-        geocode_attempted_at: now,
-        updated_at: now,
-      };
+      const query = address || name;
+      const url =
+        `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(query)}` +
+        `&region=${encodeURIComponent(region)}` +
+        `&components=${encodeURIComponent(`country:${country}`)}` +
+        `&key=${encodeURIComponent(apiKey)}`;
 
-      await docSnap.ref.set(patch, { merge: true });
-      updated.push({ id: docSnap.id, ...patch });
-    } catch (error: any) {
-      const errorMessage = String(error?.message ?? error);
+      try {
+        const response = await fetch(url);
 
-      await docSnap.ref.set({
-        geocode_status: "exception",
-        geocode_error: errorMessage.slice(0, 500),
-        geocode_attempted_at: now,
-        updated_at: now,
-      }, { merge: true });
+        if (!response.ok) {
+          const body = await response.text();
+          const errorMessage = `HTTP ${response.status}: ${body.slice(0, 300)}`;
 
-      failed.push({ id: docSnap.id, status: "exception", error: errorMessage.slice(0, 300) });
+          await docSnap.ref.set(
+            {
+              geocode_status: "http_error",
+              geocode_error: errorMessage,
+              geocode_attempted_at: now,
+              updated_at: now,
+            },
+            { merge: true },
+          );
+
+          failed.push({ id: docSnap.id, status: "http_error", error: errorMessage });
+          continue;
+        }
+
+        const json: any = await response.json();
+        const status = String(json?.status ?? "UNKNOWN");
+        const apiError = String(json?.error_message ?? "");
+
+        if (status !== "OK") {
+          const errorMessage = apiError || `Google Geocoding returned ${status}.`;
+
+          await docSnap.ref.set(
+            {
+              geocode_status: status,
+              geocode_error: errorMessage,
+              geocode_attempted_at: now,
+              updated_at: now,
+            },
+            { merge: true },
+          );
+
+          failed.push({ id: docSnap.id, status, error: errorMessage });
+          continue;
+        }
+
+        const first = json?.results?.[0];
+        const location = first?.geometry?.location;
+
+        if (typeof location?.lat !== "number" || typeof location?.lng !== "number") {
+          await docSnap.ref.set(
+            {
+              geocode_status: "no_location",
+              geocode_error: "Google returned OK but no numeric location.",
+              geocode_attempted_at: now,
+              updated_at: now,
+            },
+            { merge: true },
+          );
+
+          failed.push({
+            id: docSnap.id,
+            status: "no_location",
+            error: "Google returned OK but no numeric location.",
+          });
+          continue;
+        }
+
+        const patch = {
+          lat: location.lat,
+          lng: location.lng,
+          formatted_address: String(first.formatted_address ?? ""),
+          geocode_place_id: String(first.place_id ?? ""),
+          geocode_status: "OK",
+          geocode_error: null,
+          geocoded_at: now,
+          geocode_attempted_at: now,
+          updated_at: now,
+        };
+
+        await docSnap.ref.set(patch, { merge: true });
+        updated.push({ id: docSnap.id, ...patch });
+      } catch (error: any) {
+        const errorMessage = String(error?.message ?? error);
+
+        await docSnap.ref.set(
+          {
+            geocode_status: "exception",
+            geocode_error: errorMessage.slice(0, 500),
+            geocode_attempted_at: now,
+            updated_at: now,
+          },
+          { merge: true },
+        );
+
+        failed.push({ id: docSnap.id, status: "exception", error: errorMessage.slice(0, 300) });
+      }
     }
-  }
 
-  return {
-    ok: failed.length === 0,
-    total: docs.length,
-    updated_count: updated.length,
-    failed_count: failed.length,
-    skipped_count: skipped.length,
-    updated,
-    failed,
-    skipped,
-  };
-}); export const summarizeLearning = onCall({ region: "us-central1" }, async (request) => {
+    return {
+      ok: failed.length === 0,
+      total: docs.length,
+      updated_count: updated.length,
+      failed_count: failed.length,
+      skipped_count: skipped.length,
+      updated,
+      failed,
+      skipped,
+    };
+  },
+);
+export const summarizeLearning = onCall({ region: "us-central1" }, async (request) => {
   const uid = assertAuthed(request.auth?.uid);
   const familyId = String(request.data?.familyId ?? request.data?.family_id ?? "");
   if (!familyId) throw new HttpsError("invalid-argument", "familyId is required.");
@@ -454,9 +549,10 @@ export const geocodeFamilyPlaces = onCall({ region: "us-central1", secrets: [goo
 
   const recordsSnap = await db.collection(`families/${familyId}/learning_records`).limit(80).get();
   const records = recordsSnap.docs.map((item) => item.data());
-  const summary = records.length > 0
-    ? `Found ${records.length} learning record(s) for the selected range. Review strengths, issues and next steps in the learning records panel.`
-    : "No learning records were found for the selected range.";
+  const summary =
+    records.length > 0
+      ? `Found ${records.length} learning record(s) for the selected range. Review strengths, issues and next steps in the learning records panel.`
+      : "No learning records were found for the selected range.";
 
   let savedId: string | null = null;
   if (Boolean(request.data?.saveSummary ?? request.data?.save_summary ?? true)) {
@@ -484,13 +580,17 @@ export const undoFamilyAction = onCall({ region: "us-central1" }, async (request
   const uid = assertAuthed(request.auth?.uid);
   const familyId = String(request.data?.familyId ?? request.data?.family_id ?? "");
   const actionLogId = String(request.data?.actionLogId ?? request.data?.action_log_id ?? "");
-  if (!familyId || !actionLogId) throw new HttpsError("invalid-argument", "familyId and actionLogId are required.");
+  if (!familyId || !actionLogId)
+    throw new HttpsError("invalid-argument", "familyId and actionLogId are required.");
   await assertFamilyMember(familyId, uid);
-  await db.doc(`families/${familyId}/action_logs/${actionLogId}`).set({
-    undone: true,
-    undone_by: uid,
-    undone_at: nowIso(),
-    updated_at: nowIso(),
-  }, { merge: true });
+  await db.doc(`families/${familyId}/action_logs/${actionLogId}`).set(
+    {
+      undone: true,
+      undone_by: uid,
+      undone_at: nowIso(),
+      updated_at: nowIso(),
+    },
+    { merge: true },
+  );
   return { ok: true, actionLogId };
 });

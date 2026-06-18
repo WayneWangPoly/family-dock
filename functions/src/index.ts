@@ -26,7 +26,9 @@ function isoNow() {
 }
 
 function normalizeActionType(value: any) {
-  const raw = String(value ?? "").trim().toLowerCase();
+  const raw = String(value ?? "")
+    .trim()
+    .toLowerCase();
   if (["location", "locations", "place_location", "new_location"].includes(raw)) return "place";
   if (["calendar", "event", "schedule"].includes(raw)) return "calendar_event";
   if (["homework", "task"].includes(raw)) return "homework_task";
@@ -62,12 +64,17 @@ function normalizeActions(raw: any): any[] {
   else if (Array.isArray(raw?.actions)) actions = raw.actions;
   else if (raw?.action && typeof raw.action === "object") actions = [raw.action];
   else if (raw?.type || raw?.action_type || raw?.kind) actions = [raw];
-  return actions.map(normalizeOneAction).filter((action) => action && typeof action === "object" && action.type);
+  return actions
+    .map(normalizeOneAction)
+    .filter((action) => action && typeof action === "object" && action.type);
 }
 
 function cleanAiText(value: string) {
   return value
-    .replace(/^[\s"'`\u201c\u201d\u2018\u2019]+|[\s"'`\u201c\u201d\u2018\u2019\uff0c,\u3002.;\uff1b:\uff1a]+$/g, "")
+    .replace(
+      /^[\s"'`\u201c\u201d\u2018\u2019]+|[\s"'`\u201c\u201d\u2018\u2019\uff0c,\u3002.;\uff1b:\uff1a]+$/g,
+      "",
+    )
     .trim();
 }
 
@@ -104,7 +111,10 @@ function parseLocalFallbackAction(transcript: string, uid: string) {
     for (const keyword of keywords) {
       const index = lower.indexOf(keyword.toLowerCase());
       if (index >= 0) {
-        const raw = text.slice(index + keyword.length).replace(/^[:：,\s]+/, "").trim();
+        const raw = text
+          .slice(index + keyword.length)
+          .replace(/^[:：,\s]+/, "")
+          .trim();
         if (raw) return cleanAiText(raw.split(/[。；;\n]/)[0] ?? raw);
       }
     }
@@ -123,7 +133,10 @@ function parseLocalFallbackAction(transcript: string, uid: string) {
     if (!name) {
       name = text
         .replace(/add|create|save|new|location|place|address|school|club|home/gi, "")
-        .replace(/\u6dfb\u52a0|\u65b0\u589e|\u589e\u52a0|\u52a0\u5165|\u4fdd\u5b58|\u5730\u70b9|\u5730\u5740|\u4f4d\u7f6e/g, "")
+        .replace(
+          /\u6dfb\u52a0|\u65b0\u589e|\u589e\u52a0|\u52a0\u5165|\u4fdd\u5b58|\u5730\u70b9|\u5730\u5740|\u4f4d\u7f6e/g,
+          "",
+        )
         .split(/[。；;\n]/)[0]
         .trim();
     }
@@ -197,89 +210,104 @@ function parseLocalFallbackAction(transcript: string, uid: string) {
   return null;
 }
 
-export const parseAiCommand = onCall({ secrets: [openAiApiKey], region: "us-central1" }, async (request) => {
-  const uid = assertAuthed(request.auth?.uid);
-  const familyId = String(request.data?.family_id ?? "");
-  const transcript = String(request.data?.transcript ?? "").trim();
-  const timezone = String(request.data?.timezone ?? "Australia/Adelaide");
-  const currentDate = String(request.data?.current_date ?? new Date().toISOString().slice(0, 10));
+export const parseAiCommand = onCall(
+  { secrets: [openAiApiKey], region: "us-central1" },
+  async (request) => {
+    const uid = assertAuthed(request.auth?.uid);
+    const familyId = String(request.data?.family_id ?? "");
+    const transcript = String(request.data?.transcript ?? "").trim();
+    const timezone = String(request.data?.timezone ?? "Australia/Adelaide");
+    const currentDate = String(request.data?.current_date ?? new Date().toISOString().slice(0, 10));
 
-  if (!familyId) throw new HttpsError("invalid-argument", "family_id is required.");
-  if (!transcript) throw new HttpsError("invalid-argument", "transcript is required.");
-  await assertFamilyMember(familyId, uid);
+    if (!familyId) throw new HttpsError("invalid-argument", "family_id is required.");
+    if (!transcript) throw new HttpsError("invalid-argument", "transcript is required.");
+    await assertFamilyMember(familyId, uid);
 
-  const system = `You convert a parent's natural language request into Family Dock JSON actions. Return JSON only. Supported action types: calendar_event, homework_task, payment, request, meal_plan, notebook_note, place. Use snake_case fields. Required examples: calendar_event {type,title,start_at,end_at,child_id,place_id,event_type}; homework_task {type,title,due_at,child_id,items:[{label,item_type,is_required}]}; payment {type,title,amount,currency,due_date,child_id,pay_to,reference}; request {type,title,detail,requester_id,request_type}; place {type,name,address,place_type}. Today's date: ${currentDate}. Timezone: ${timezone}. If information is missing, set needs_clarification true and missing_fields.`;
+    const system = `You convert a parent's natural language request into Family Dock JSON actions. Return JSON only. Supported action types: calendar_event, homework_task, payment, request, meal_plan, notebook_note, place. Use snake_case fields. Required examples: calendar_event {type,title,start_at,end_at,child_id,place_id,event_type}; homework_task {type,title,due_at,child_id,items:[{label,item_type,is_required}]}; payment {type,title,amount,currency,due_date,child_id,pay_to,reference}; request {type,title,detail,requester_id,request_type}; place {type,name,address,place_type}. Today's date: ${currentDate}. Timezone: ${timezone}. If information is missing, set needs_clarification true and missing_fields.`;
 
-  let parsed: any;
-  try {
-    const client = new OpenAI({ apiKey: openAiApiKey.value() });
-    const response = await client.chat.completions.create({
-      model: "gpt-4.1-mini",
-      temperature: 0.1,
-      messages: [
-        { role: "system", content: system },
-        { role: "user", content: transcript },
-      ],
-      response_format: { type: "json_object" },
-    });
-    parsed = JSON.parse(response.choices[0]?.message?.content ?? "{}");
-  } catch (error: any) {
-    console.error("parseAiCommand OpenAI/model parse failed", {
-      message: error?.message ?? String(error),
-      name: error?.name ?? null,
-      status: error?.status ?? null,
-      code: error?.code ?? null,
-    });
+    let parsed: any;
+    try {
+      const client = new OpenAI({ apiKey: openAiApiKey.value() });
+      const response = await client.chat.completions.create({
+        model: "gpt-4.1-mini",
+        temperature: 0.1,
+        messages: [
+          { role: "system", content: system },
+          { role: "user", content: transcript },
+        ],
+        response_format: { type: "json_object" },
+      });
+      parsed = JSON.parse(response.choices[0]?.message?.content ?? "{}");
+    } catch (error: any) {
+      console.error("parseAiCommand OpenAI/model parse failed", {
+        message: error?.message ?? String(error),
+        name: error?.name ?? null,
+        status: error?.status ?? null,
+        code: error?.code ?? null,
+      });
 
-    const fallback = parseLocalFallbackAction(transcript, uid);
-    parsed = fallback ?? {
-      intent: "needs_setup",
-      confidence: 0,
-      language: "auto",
-      needs_clarification: true,
-      clarifying_question: "AI is connected, but the model response is not ready. Try adding clear details such as name, date, time, address or amount.",
-      missing_fields: ["model_response"],
-      draft_summary: transcript,
-      actions: [],
-    };
-  }
-
-  let normalizedActions = normalizeActions(parsed);
-  if (normalizedActions.length === 0) {
-    const fallback = parseLocalFallbackAction(transcript, uid);
-    if (fallback) {
-      console.info("parseAiCommand using local fallback action", { intent: fallback.intent });
-      parsed = fallback;
-      normalizedActions = normalizeActions(parsed);
+      const fallback = parseLocalFallbackAction(transcript, uid);
+      parsed = fallback ?? {
+        intent: "needs_setup",
+        confidence: 0,
+        language: "auto",
+        needs_clarification: true,
+        clarifying_question:
+          "AI is connected, but the model response is not ready. Try adding clear details such as name, date, time, address or amount.",
+        missing_fields: ["model_response"],
+        draft_summary: transcript,
+        actions: [],
+      };
     }
-  }
 
-  const actionMissingFields = normalizedActions.flatMap((action) => Array.isArray(action.missing_fields) ? action.missing_fields : []);
-  const missingFields = actionMissingFields.length > 0
-    ? Array.from(new Set(actionMissingFields))
-    : Array.isArray(parsed.missing_fields) ? parsed.missing_fields : [];
+    let normalizedActions = normalizeActions(parsed);
+    if (normalizedActions.length === 0) {
+      const fallback = parseLocalFallbackAction(transcript, uid);
+      if (fallback) {
+        console.info("parseAiCommand using local fallback action", { intent: fallback.intent });
+        parsed = fallback;
+        normalizedActions = normalizeActions(parsed);
+      }
+    }
 
-  const normalized = {
-    intent: parsed.intent ?? "family_update",
-    confidence: Number(parsed.confidence ?? 0.6),
-    language: parsed.language ?? "auto",
-    needs_clarification: normalizedActions.length > 0 ? missingFields.length > 0 : Boolean(parsed.needs_clarification ?? false),
-    clarifying_question: normalizedActions.length > 0 && missingFields.length === 0 ? null : parsed.clarifying_question ?? null,
-    missing_fields: missingFields,
-    draft_summary: parsed.draft_summary ?? transcript,
-    actions: normalizedActions,
-  };
+    const actionMissingFields = normalizedActions.flatMap((action) =>
+      Array.isArray(action.missing_fields) ? action.missing_fields : [],
+    );
+    const missingFields =
+      actionMissingFields.length > 0
+        ? Array.from(new Set(actionMissingFields))
+        : Array.isArray(parsed.missing_fields)
+          ? parsed.missing_fields
+          : [];
 
-  const logRef = await db.collection(`families/${familyId}/ai_logs`).add({
-    family_id: familyId,
-    user_id: uid,
-    transcript,
-    parsed: normalized,
-    created_at: isoNow(),
-  });
+    const normalized = {
+      intent: parsed.intent ?? "family_update",
+      confidence: Number(parsed.confidence ?? 0.6),
+      language: parsed.language ?? "auto",
+      needs_clarification:
+        normalizedActions.length > 0
+          ? missingFields.length > 0
+          : Boolean(parsed.needs_clarification ?? false),
+      clarifying_question:
+        normalizedActions.length > 0 && missingFields.length === 0
+          ? null
+          : (parsed.clarifying_question ?? null),
+      missing_fields: missingFields,
+      draft_summary: parsed.draft_summary ?? transcript,
+      actions: normalizedActions,
+    };
 
-  return { ok: true, ai_interaction_id: logRef.id, parsed: normalized, model: "firebase-openai" };
-});
+    const logRef = await db.collection(`families/${familyId}/ai_logs`).add({
+      family_id: familyId,
+      user_id: uid,
+      transcript,
+      parsed: normalized,
+      created_at: isoNow(),
+    });
+
+    return { ok: true, ai_interaction_id: logRef.id, parsed: normalized, model: "firebase-openai" };
+  },
+);
 
 export const commitAiActions = onCall({ region: "us-central1" }, async (request) => {
   const uid = assertAuthed(request.auth?.uid);
@@ -398,12 +426,19 @@ export const commitAiActions = onCall({ region: "us-central1" }, async (request)
       created_at: createdAt,
       updated_at: createdAt,
     });
-    committed.push({ client_action_id: action.client_action_id ?? null, type, table: collectionName, id: ref.id, action_log_id: "" });
+    committed.push({
+      client_action_id: action.client_action_id ?? null,
+      type,
+      table: collectionName,
+      id: ref.id,
+      action_log_id: "",
+    });
 
     if (type === "homework_task") {
-      const items = Array.isArray(action.items) && action.items.length > 0
-        ? action.items
-        : [{ label: "Complete homework", item_type: "checkbox", is_required: true }];
+      const items =
+        Array.isArray(action.items) && action.items.length > 0
+          ? action.items
+          : [{ label: "Complete homework", item_type: "checkbox", is_required: true }];
       items.forEach((item: any, index: number) => {
         const itemRef = db.collection(`families/${familyId}/homework_items`).doc();
         batch.set(itemRef, {
@@ -426,7 +461,6 @@ export const commitAiActions = onCall({ region: "us-central1" }, async (request)
   return { ok: true, committed, count: committed.length };
 });
 
-
 async function assertFamilyParent(familyId: string, uid: string) {
   const member = await assertFamilyMember(familyId, uid);
   const role = String(member.role ?? "");
@@ -441,16 +475,21 @@ export const createMemberLogin = onCall({ region: "us-central1" }, async (reques
   const familyId = String(request.data?.familyId ?? request.data?.family_id ?? "");
   const existingMemberId = request.data?.memberId ? String(request.data.memberId) : null;
   const displayName = String(request.data?.displayName ?? request.data?.display_name ?? "").trim();
-  const email = String(request.data?.email ?? "").trim().toLowerCase();
+  const email = String(request.data?.email ?? "")
+    .trim()
+    .toLowerCase();
   const password = String(request.data?.password ?? "");
   const role = String(request.data?.role ?? "child");
   const color = request.data?.color ? String(request.data.color) : null;
-  const defaultNavigationApp = request.data?.defaultNavigationApp ? String(request.data.defaultNavigationApp) : "google";
+  const defaultNavigationApp = request.data?.defaultNavigationApp
+    ? String(request.data.defaultNavigationApp)
+    : "google";
 
   if (!familyId) throw new HttpsError("invalid-argument", "familyId is required.");
   if (!displayName) throw new HttpsError("invalid-argument", "displayName is required.");
   if (!email) throw new HttpsError("invalid-argument", "email is required.");
-  if (password.length < 8) throw new HttpsError("invalid-argument", "Password must be at least 8 characters.");
+  if (password.length < 8)
+    throw new HttpsError("invalid-argument", "Password must be at least 8 characters.");
   if (!["parent", "guardian", "child", "homestay"].includes(role)) {
     throw new HttpsError("invalid-argument", "Unsupported role.");
   }
@@ -470,31 +509,39 @@ export const createMemberLogin = onCall({ region: "us-central1" }, async (reques
   const userRef = db.doc(`users/${userRecord.uid}`);
   const batch = db.batch();
 
-  batch.set(memberRef, {
-    id: userRecord.uid,
-    family_id: familyId,
-    auth_user_id: userRecord.uid,
-    display_name: displayName,
-    role,
-    color,
-    avatar_url: null,
-    default_navigation_app: defaultNavigationApp,
-    can_login: true,
-    email,
-    active: true,
-    created_at: createdAt,
-    updated_at: createdAt,
-    created_by: callerUid,
-  }, { merge: true });
+  batch.set(
+    memberRef,
+    {
+      id: userRecord.uid,
+      family_id: familyId,
+      auth_user_id: userRecord.uid,
+      display_name: displayName,
+      role,
+      color,
+      avatar_url: null,
+      default_navigation_app: defaultNavigationApp,
+      can_login: true,
+      email,
+      active: true,
+      created_at: createdAt,
+      updated_at: createdAt,
+      created_by: callerUid,
+    },
+    { merge: true },
+  );
 
-  batch.set(userRef, {
-    uid: userRecord.uid,
-    email,
-    display_name: displayName,
-    default_family_id: familyId,
-    created_at: createdAt,
-    updated_at: createdAt,
-  }, { merge: true });
+  batch.set(
+    userRef,
+    {
+      uid: userRecord.uid,
+      email,
+      display_name: displayName,
+      default_family_id: familyId,
+      created_at: createdAt,
+      updated_at: createdAt,
+    },
+    { merge: true },
+  );
 
   if (existingMemberId && existingMemberId !== userRecord.uid) {
     batch.delete(db.doc(`families/${familyId}/members/${existingMemberId}`));
@@ -504,7 +551,29 @@ export const createMemberLogin = onCall({ region: "us-central1" }, async (reques
 
   return { ok: true, uid: userRecord.uid, member_id: userRecord.uid };
 });
-export { adminMemberAccountAction, createMemberInvite, bulkMemberInvites, selfRegisterMember, createFamilyAccount, geocodeFamilyPlaces, summarizeLearning, undoFamilyAction } from './firebaseMigrationAdditions.js';
+export {
+  adminMemberAccountAction,
+  createMemberInvite,
+  bulkMemberInvites,
+  selfRegisterMember,
+  createFamilyAccount,
+  geocodeFamilyPlaces,
+  summarizeLearning,
+  undoFamilyAction,
+} from "./firebaseMigrationAdditions.js";
 
-
-export { transcribeAudio, generateProgressSummary, generateReportShareVersion, routeLateRiskCheck, routeDepartureAlerts, savePushSubscription, sendFamilyReminders, systemHealthCheck, scheduledFamilyRunner, scheduledAfternoonRouteRunner, scheduledFamilyReminderRunner, buildDailyRouteDeparturePlans, refreshRouteLegTravelTimes } from './firebaseMigrationPass2.js';
+export {
+  transcribeAudio,
+  generateProgressSummary,
+  generateReportShareVersion,
+  routeLateRiskCheck,
+  routeDepartureAlerts,
+  savePushSubscription,
+  sendFamilyReminders,
+  systemHealthCheck,
+  scheduledFamilyRunner,
+  scheduledAfternoonRouteRunner,
+  scheduledFamilyReminderRunner,
+  buildDailyRouteDeparturePlans,
+  refreshRouteLegTravelTimes,
+} from "./firebaseMigrationPass2.js";

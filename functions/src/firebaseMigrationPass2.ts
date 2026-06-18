@@ -1,9 +1,21 @@
-import { logger } from "firebase-functions"; import { onSchedule } from "firebase-functions/v2/scheduler"; import webpush from "web-push"; import OpenAI, { toFile } from "openai"; import { getApps, initializeApp } from "firebase-admin/app"; if (!getApps().length) initializeApp(); ﻿import { getAuth } from "firebase-admin/auth";
+import { logger } from "firebase-functions";
+import { onSchedule } from "firebase-functions/v2/scheduler";
+import webpush from "web-push";
+import OpenAI, { toFile } from "openai";
+import { getApps, initializeApp } from "firebase-admin/app";
+if (!getApps().length) initializeApp();
+import { getAuth } from "firebase-admin/auth";
 import { getFirestore } from "firebase-admin/firestore";
-import { HttpsError, onCall } from "firebase-functions/v2/https"; import { defineSecret } from "firebase-functions/params";
+import { HttpsError, onCall } from "firebase-functions/v2/https";
+import { defineSecret } from "firebase-functions/params";
 
 const db = getFirestore();
-const adminAuth = getAuth(); const openAiApiKey = defineSecret("OPENAI_API_KEY"); const vapidPublicKey = defineSecret("VAPID_PUBLIC_KEY"); const vapidPrivateKey = defineSecret("VAPID_PRIVATE_KEY"); const vapidSubject = defineSecret("VAPID_SUBJECT"); const googleMapsApiKey = defineSecret("GOOGLE_MAPS_API_KEY");
+const adminAuth = getAuth();
+const openAiApiKey = defineSecret("OPENAI_API_KEY");
+const vapidPublicKey = defineSecret("VAPID_PUBLIC_KEY");
+const vapidPrivateKey = defineSecret("VAPID_PRIVATE_KEY");
+const vapidSubject = defineSecret("VAPID_SUBJECT");
+const googleMapsApiKey = defineSecret("GOOGLE_MAPS_API_KEY");
 
 function assertAuthed(uid?: string) {
   if (!uid) throw new HttpsError("unauthenticated", "Login required.");
@@ -13,269 +25,310 @@ function assertAuthed(uid?: string) {
 async function assertFamilyMember(familyId: string, uid: string) {
   const direct = await db.doc(`families/${familyId}/members/${uid}`).get();
   if (direct.exists) return direct.data() ?? {};
-  const members = await db.collection(`families/${familyId}/members`).where("auth_user_id", "==", uid).limit(1).get();
+  const members = await db
+    .collection(`families/${familyId}/members`)
+    .where("auth_user_id", "==", uid)
+    .limit(1)
+    .get();
   if (members.empty) throw new HttpsError("permission-denied", "Not a family member.");
   return members.docs[0].data();
 }
 
-function isoNow() { return new Date().toISOString(); }
-function cleanFamilyId(value: unknown) { const familyId = String(value ?? "").trim(); if (!familyId) throw new HttpsError("invalid-argument", "family_id is required."); return familyId; }
-function safeText(value: unknown, fallback = "") { return String(value ?? fallback).trim(); }
+function isoNow() {
+  return new Date().toISOString();
+}
+function cleanFamilyId(value: unknown) {
+  const familyId = String(value ?? "").trim();
+  if (!familyId) throw new HttpsError("invalid-argument", "family_id is required.");
+  return familyId;
+}
+function safeText(value: unknown, fallback = "") {
+  return String(value ?? fallback).trim();
+}
 
-export const transcribeAudio = onCall({ region: "us-central1", secrets: [openAiApiKey] }, async (request) => {
-  const uid = assertAuthed(request.auth?.uid);
-  const apiKey = openAiApiKey.value();
+export const transcribeAudio = onCall(
+  { region: "us-central1", secrets: [openAiApiKey] },
+  async (request) => {
+    const uid = assertAuthed(request.auth?.uid);
+    const apiKey = openAiApiKey.value();
 
-  if (!apiKey) {
-    throw new HttpsError("failed-precondition", "OPENAI_API_KEY secret is missing.");
-  }
+    if (!apiKey) {
+      throw new HttpsError("failed-precondition", "OPENAI_API_KEY secret is missing.");
+    }
 
-  const audioBase64 = safeText(request.data?.audio_base64);
-  const mimeType = safeText(request.data?.mime_type, "audio/webm").toLowerCase();
-  const originalFilename = safeText(request.data?.filename, "family-dock-voice.webm");
+    const audioBase64 = safeText(request.data?.audio_base64);
+    const mimeType = safeText(request.data?.mime_type, "audio/webm").toLowerCase();
+    const originalFilename = safeText(request.data?.filename, "family-dock-voice.webm");
 
-  if (!audioBase64) {
-    throw new HttpsError("invalid-argument", "audio_base64 is required.");
-  }
+    if (!audioBase64) {
+      throw new HttpsError("invalid-argument", "audio_base64 is required.");
+    }
 
-  const cleaned = audioBase64.includes(",") ? audioBase64.split(",").pop() ?? "" : audioBase64;
-  const audioBuffer = Buffer.from(cleaned, "base64");
+    const cleaned = audioBase64.includes(",") ? (audioBase64.split(",").pop() ?? "") : audioBase64;
+    const audioBuffer = Buffer.from(cleaned, "base64");
 
-  if (!audioBuffer.length) {
-    throw new HttpsError("invalid-argument", "Audio payload is empty.");
-  }
+    if (!audioBuffer.length) {
+      throw new HttpsError("invalid-argument", "Audio payload is empty.");
+    }
 
-  const maxBytes = 8 * 1024 * 1024;
-  if (audioBuffer.byteLength > maxBytes) {
-    throw new HttpsError(
-      "invalid-argument",
-      `Audio is too large for callable transcription. Keep recordings under ${Math.round(maxBytes / 1024 / 1024)} MB.`,
+    const maxBytes = 8 * 1024 * 1024;
+    if (audioBuffer.byteLength > maxBytes) {
+      throw new HttpsError(
+        "invalid-argument",
+        `Audio is too large for callable transcription. Keep recordings under ${Math.round(maxBytes / 1024 / 1024)} MB.`,
+      );
+    }
+
+    const extensionFromMime = mimeType.includes("mp3")
+      ? "mp3"
+      : mimeType.includes("mp4")
+        ? "mp4"
+        : mimeType.includes("mpeg")
+          ? "mpeg"
+          : mimeType.includes("mpga")
+            ? "mpga"
+            : mimeType.includes("m4a")
+              ? "m4a"
+              : mimeType.includes("wav")
+                ? "wav"
+                : mimeType.includes("ogg")
+                  ? "ogg"
+                  : mimeType.includes("oga")
+                    ? "oga"
+                    : "webm";
+
+    const safeFilename = originalFilename.includes(".")
+      ? originalFilename.replace(/[^a-zA-Z0-9._-]/g, "-")
+      : `family-dock-voice.${extensionFromMime}`;
+
+    const model = safeText(request.data?.model, "gpt-4o-mini-transcribe");
+    const language = safeText(request.data?.language);
+    const prompt = safeText(
+      request.data?.prompt,
+      "Family schedule, child activities, homework, locations, requests, payments, fencing, school, Adelaide.",
     );
-  }
 
-  const extensionFromMime =
-    mimeType.includes("mp3") ? "mp3" :
-    mimeType.includes("mp4") ? "mp4" :
-    mimeType.includes("mpeg") ? "mpeg" :
-    mimeType.includes("mpga") ? "mpga" :
-    mimeType.includes("m4a") ? "m4a" :
-    mimeType.includes("wav") ? "wav" :
-    mimeType.includes("ogg") ? "ogg" :
-    mimeType.includes("oga") ? "oga" :
-    "webm";
+    try {
+      const client = new OpenAI({ apiKey });
+      const file = await toFile(audioBuffer, safeFilename, {
+        type: mimeType || "audio/webm",
+      });
 
-  const safeFilename = originalFilename.includes(".")
-    ? originalFilename.replace(/[^a-zA-Z0-9._-]/g, "-")
-    : `family-dock-voice.${extensionFromMime}`;
+      const transcription = await client.audio.transcriptions.create({
+        file,
+        model,
+        language: language || undefined,
+        prompt,
+        response_format: "json",
+      });
 
-  const model = safeText(request.data?.model, "gpt-4o-mini-transcribe");
-  const language = safeText(request.data?.language);
-  const prompt = safeText(
-    request.data?.prompt,
-    "Family schedule, child activities, homework, locations, requests, payments, fencing, school, Adelaide.",
-  );
+      const text = String((transcription as { text?: unknown }).text ?? "").trim();
 
-  try {
-    const client = new OpenAI({ apiKey });
-    const file = await toFile(audioBuffer, safeFilename, {
-      type: mimeType || "audio/webm",
-    });
+      await db.collection("ai_audio_logs").add({
+        auth_user_id: uid,
+        filename: safeFilename,
+        mime_type: mimeType,
+        size_bytes: audioBuffer.byteLength,
+        model,
+        text_length: text.length,
+        created_at: isoNow(),
+      });
 
-    const transcription = await client.audio.transcriptions.create({
-      file,
-      model,
-      language: language || undefined,
-      prompt,
-      response_format: "json",
-    });
-
-    const text = String((transcription as { text?: unknown }).text ?? "").trim();
-
-    await db.collection("ai_audio_logs").add({
-      auth_user_id: uid,
-      filename: safeFilename,
-      mime_type: mimeType,
-      size_bytes: audioBuffer.byteLength,
-      model,
-      text_length: text.length,
-      created_at: isoNow(),
-    });
-
-    return {
-      ok: true,
-      text,
-      size: audioBuffer.byteLength,
-      mime_type: mimeType,
-      filename: safeFilename,
-      model,
-    };
-  } catch (error: any) {
-    console.error("transcribeAudio failed", {
-      uid,
-      mime_type: mimeType,
-      filename: safeFilename,
-      size_bytes: audioBuffer.byteLength,
-      message: error?.message ?? String(error),
-      status: error?.status ?? null,
-      code: error?.code ?? null,
-    });
-
-    throw new HttpsError(
-      "internal",
-      `Audio transcription failed: ${String(error?.message ?? error).slice(0, 300)}`,
-    );
-  }
-}); export const generateProgressSummary = onCall({ region: "us-central1", secrets: [openAiApiKey] }, async (request) => {
-  const uid = assertAuthed(request.auth?.uid);
-  const familyId = cleanFamilyId(request.data?.family_id);
-  await assertFamilyMember(familyId, uid);
-
-  const apiKey = openAiApiKey.value();
-  if (!apiKey) {
-    throw new HttpsError("failed-precondition", "OPENAI_API_KEY secret is missing.");
-  }
-
-  const now = isoNow();
-  const childId = safeText(request.data?.child_id) || null;
-  if (!childId) throw new HttpsError("invalid-argument", "child_id is required.");
-
-  const periodStart = safeText(request.data?.period_start, now.slice(0, 10));
-  const periodEnd = safeText(request.data?.period_end, periodStart);
-  const periodType = safeText(request.data?.period_type, "custom") as "week" | "month" | "term" | "custom";
-  const subject = safeText(request.data?.subject) || null;
-  const language = safeText(request.data?.language, "zh");
-
-  const familyRef = db.doc(`families/${familyId}`);
-  const childRef = db.doc(`families/${familyId}/members/${childId}`);
-  const [familySnap, childSnap] = await Promise.all([familyRef.get(), childRef.get()]);
-
-  const family = familySnap.data() ?? {};
-  const child = childSnap.data() ?? {};
-  const childName = safeText(child.display_name, "Child");
-
-  function inDateRange(value: unknown) {
-    const date = String(value ?? "").slice(0, 10);
-    return Boolean(date) && date >= periodStart && date <= periodEnd;
-  }
-
-  function compactRecord(docSnap: any) {
-    const row = docSnap.data() ?? {};
-    return {
-      id: docSnap.id,
-      lesson_date: row.lesson_date ?? null,
-      course_name: row.course_name ?? null,
-      lesson_title: row.lesson_title ?? null,
-      child_comment: row.child_comment ?? null,
-      parent_comment: row.parent_comment ?? null,
-      teacher_feedback: row.teacher_feedback ?? null,
-      summary: row.summary ?? null,
-      strengths: Array.isArray(row.strengths) ? row.strengths : [],
-      issues: Array.isArray(row.issues) ? row.issues : [],
-      next_steps: Array.isArray(row.next_steps) ? row.next_steps : [],
-      expectations: Array.isArray(row.expectations) ? row.expectations : [],
-      tags: Array.isArray(row.tags) ? row.tags : [],
-    };
-  }
-
-  function compactEvent(docSnap: any) {
-    const row = docSnap.data() ?? {};
-    return {
-      id: docSnap.id,
-      title: row.title ?? null,
-      event_type: row.event_type ?? null,
-      start_at: row.start_at ?? null,
-      end_at: row.end_at ?? null,
-      status: row.status ?? null,
-      teacher_name: row.teacher_name ?? null,
-      place_id: row.place_id ?? null,
-    };
-  }
-
-  function compactHomework(docSnap: any, items: any[]) {
-    const row = docSnap.data() ?? {};
-    return {
-      id: docSnap.id,
-      title: row.title ?? null,
-      due_at: row.due_at ?? null,
-      status: row.status ?? null,
-      source: row.source ?? null,
-      items,
-    };
-  }
-
-  const [recordSnap, homeworkSnap, eventSnap] = await Promise.all([
-    db.collection(`families/${familyId}/learning_records`).where("child_id", "==", childId).limit(120).get(),
-    db.collection(`families/${familyId}/homework_tasks`).where("child_id", "==", childId).limit(150).get(),
-    db.collection(`families/${familyId}/events`).where("child_id", "==", childId).limit(160).get(),
-  ]);
-
-  const records = recordSnap.docs
-    .map(compactRecord)
-    .filter((row) => inDateRange(row.lesson_date))
-    .slice(0, 50);
-
-  const eventRows = eventSnap.docs
-    .map(compactEvent)
-    .filter((row) => inDateRange(row.start_at))
-    .slice(0, 50);
-
-  const homeworkDocs = homeworkSnap.docs
-    .filter((docSnap) => {
-      const row = docSnap.data() ?? {};
-      return inDateRange(row.due_at ?? row.created_at ?? row.updated_at);
-    })
-    .slice(0, 50);
-
-  const homeworkRows = [];
-  for (const taskDoc of homeworkDocs) {
-    const itemsSnap = await db
-      .collection(`families/${familyId}/homework_items`)
-      .where("homework_task_id", "==", taskDoc.id)
-      .limit(30)
-      .get();
-
-    const items = itemsSnap.docs.map((itemDoc) => {
-      const item = itemDoc.data() ?? {};
       return {
-        id: itemDoc.id,
-        label: item.label ?? null,
-        item_type: item.item_type ?? null,
-        is_required: Boolean(item.is_required ?? false),
-        is_done: Boolean(item.is_done ?? false),
-        sort_order: Number(item.sort_order ?? 0),
+        ok: true,
+        text,
+        size: audioBuffer.byteLength,
+        mime_type: mimeType,
+        filename: safeFilename,
+        model,
       };
-    });
+    } catch (error: any) {
+      console.error("transcribeAudio failed", {
+        uid,
+        mime_type: mimeType,
+        filename: safeFilename,
+        size_bytes: audioBuffer.byteLength,
+        message: error?.message ?? String(error),
+        status: error?.status ?? null,
+        code: error?.code ?? null,
+      });
 
-    homeworkRows.push(compactHomework(taskDoc, items));
-  }
+      throw new HttpsError(
+        "internal",
+        `Audio transcription failed: ${String(error?.message ?? error).slice(0, 300)}`,
+      );
+    }
+  },
+);
+export const generateProgressSummary = onCall(
+  { region: "us-central1", secrets: [openAiApiKey] },
+  async (request) => {
+    const uid = assertAuthed(request.auth?.uid);
+    const familyId = cleanFamilyId(request.data?.family_id);
+    await assertFamilyMember(familyId, uid);
 
-  const evidence = {
-    family: {
-      name: family.name ?? null,
-      timezone: family.timezone ?? "Australia/Adelaide",
-      state_region: family.state_region ?? null,
-      school_level: family.school_level ?? null,
-    },
-    child: {
-      id: childId,
-      display_name: childName,
-      role: child.role ?? null,
-    },
-    period: {
-      type: periodType,
-      start: periodStart,
-      end: periodEnd,
-      subject,
-      language,
-    },
-    learning_records: records,
-    homework_tasks: homeworkRows,
-    calendar_events: eventRows,
-  };
+    const apiKey = openAiApiKey.value();
+    if (!apiKey) {
+      throw new HttpsError("failed-precondition", "OPENAI_API_KEY secret is missing.");
+    }
 
-  const evidenceCount = records.length + homeworkRows.length + eventRows.length;
+    const now = isoNow();
+    const childId = safeText(request.data?.child_id) || null;
+    if (!childId) throw new HttpsError("invalid-argument", "child_id is required.");
 
-  const system = `You are a careful family learning progress assistant.
+    const periodStart = safeText(request.data?.period_start, now.slice(0, 10));
+    const periodEnd = safeText(request.data?.period_end, periodStart);
+    const periodType = safeText(request.data?.period_type, "custom") as
+      | "week"
+      | "month"
+      | "term"
+      | "custom";
+    const subject = safeText(request.data?.subject) || null;
+    const language = safeText(request.data?.language, "zh");
+
+    const familyRef = db.doc(`families/${familyId}`);
+    const childRef = db.doc(`families/${familyId}/members/${childId}`);
+    const [familySnap, childSnap] = await Promise.all([familyRef.get(), childRef.get()]);
+
+    const family = familySnap.data() ?? {};
+    const child = childSnap.data() ?? {};
+    const childName = safeText(child.display_name, "Child");
+
+    function inDateRange(value: unknown) {
+      const date = String(value ?? "").slice(0, 10);
+      return Boolean(date) && date >= periodStart && date <= periodEnd;
+    }
+
+    function compactRecord(docSnap: any) {
+      const row = docSnap.data() ?? {};
+      return {
+        id: docSnap.id,
+        lesson_date: row.lesson_date ?? null,
+        course_name: row.course_name ?? null,
+        lesson_title: row.lesson_title ?? null,
+        child_comment: row.child_comment ?? null,
+        parent_comment: row.parent_comment ?? null,
+        teacher_feedback: row.teacher_feedback ?? null,
+        summary: row.summary ?? null,
+        strengths: Array.isArray(row.strengths) ? row.strengths : [],
+        issues: Array.isArray(row.issues) ? row.issues : [],
+        next_steps: Array.isArray(row.next_steps) ? row.next_steps : [],
+        expectations: Array.isArray(row.expectations) ? row.expectations : [],
+        tags: Array.isArray(row.tags) ? row.tags : [],
+      };
+    }
+
+    function compactEvent(docSnap: any) {
+      const row = docSnap.data() ?? {};
+      return {
+        id: docSnap.id,
+        title: row.title ?? null,
+        event_type: row.event_type ?? null,
+        start_at: row.start_at ?? null,
+        end_at: row.end_at ?? null,
+        status: row.status ?? null,
+        teacher_name: row.teacher_name ?? null,
+        place_id: row.place_id ?? null,
+      };
+    }
+
+    function compactHomework(docSnap: any, items: any[]) {
+      const row = docSnap.data() ?? {};
+      return {
+        id: docSnap.id,
+        title: row.title ?? null,
+        due_at: row.due_at ?? null,
+        status: row.status ?? null,
+        source: row.source ?? null,
+        items,
+      };
+    }
+
+    const [recordSnap, homeworkSnap, eventSnap] = await Promise.all([
+      db
+        .collection(`families/${familyId}/learning_records`)
+        .where("child_id", "==", childId)
+        .limit(120)
+        .get(),
+      db
+        .collection(`families/${familyId}/homework_tasks`)
+        .where("child_id", "==", childId)
+        .limit(150)
+        .get(),
+      db
+        .collection(`families/${familyId}/events`)
+        .where("child_id", "==", childId)
+        .limit(160)
+        .get(),
+    ]);
+
+    const records = recordSnap.docs
+      .map(compactRecord)
+      .filter((row) => inDateRange(row.lesson_date))
+      .slice(0, 50);
+
+    const eventRows = eventSnap.docs
+      .map(compactEvent)
+      .filter((row) => inDateRange(row.start_at))
+      .slice(0, 50);
+
+    const homeworkDocs = homeworkSnap.docs
+      .filter((docSnap) => {
+        const row = docSnap.data() ?? {};
+        return inDateRange(row.due_at ?? row.created_at ?? row.updated_at);
+      })
+      .slice(0, 50);
+
+    const homeworkRows = [];
+    for (const taskDoc of homeworkDocs) {
+      const itemsSnap = await db
+        .collection(`families/${familyId}/homework_items`)
+        .where("homework_task_id", "==", taskDoc.id)
+        .limit(30)
+        .get();
+
+      const items = itemsSnap.docs.map((itemDoc) => {
+        const item = itemDoc.data() ?? {};
+        return {
+          id: itemDoc.id,
+          label: item.label ?? null,
+          item_type: item.item_type ?? null,
+          is_required: Boolean(item.is_required ?? false),
+          is_done: Boolean(item.is_done ?? false),
+          sort_order: Number(item.sort_order ?? 0),
+        };
+      });
+
+      homeworkRows.push(compactHomework(taskDoc, items));
+    }
+
+    const evidence = {
+      family: {
+        name: family.name ?? null,
+        timezone: family.timezone ?? "Australia/Adelaide",
+        state_region: family.state_region ?? null,
+        school_level: family.school_level ?? null,
+      },
+      child: {
+        id: childId,
+        display_name: childName,
+        role: child.role ?? null,
+      },
+      period: {
+        type: periodType,
+        start: periodStart,
+        end: periodEnd,
+        subject,
+        language,
+      },
+      learning_records: records,
+      homework_tasks: homeworkRows,
+      calendar_events: eventRows,
+    };
+
+    const evidenceCount = records.length + homeworkRows.length + eventRows.length;
+
+    const system = `You are a careful family learning progress assistant.
 Return JSON only. Do not invent facts. Use only the evidence provided.
 The report is for a parent. It should be useful, specific, and balanced.
 If evidence is weak, say so clearly.
@@ -298,132 +351,167 @@ Required JSON fields:
 }
 Language target: ${language}.`;
 
-  const client = new OpenAI({ apiKey });
-  let parsed: any = null;
+    const client = new OpenAI({ apiKey });
+    let parsed: any = null;
 
-  try {
-    const response = await client.chat.completions.create({
+    try {
+      const response = await client.chat.completions.create({
+        model: "gpt-4.1-mini",
+        temperature: 0.2,
+        response_format: { type: "json_object" },
+        messages: [
+          { role: "system", content: system },
+          { role: "user", content: JSON.stringify(evidence).slice(0, 45000) },
+        ],
+      });
+
+      parsed = JSON.parse(response.choices[0]?.message?.content ?? "{}");
+    } catch (error: any) {
+      console.error("generateProgressSummary OpenAI failed", {
+        message: error?.message ?? String(error),
+        status: error?.status ?? null,
+        code: error?.code ?? null,
+      });
+
+      throw new HttpsError(
+        "internal",
+        `AI progress summary failed: ${String(error?.message ?? error).slice(0, 300)}`,
+      );
+    }
+
+    function asList(value: unknown) {
+      return Array.isArray(value)
+        ? value
+            .map((item) => String(item ?? "").trim())
+            .filter(Boolean)
+            .slice(0, 12)
+        : [];
+    }
+
+    function asText(value: unknown, fallback: string) {
+      const text = String(value ?? "").trim();
+      return text || fallback;
+    }
+
+    const evidenceBasedConfidence =
+      evidenceCount >= 10 ? 0.82 : evidenceCount >= 5 ? 0.7 : evidenceCount >= 2 ? 0.55 : 0.35;
+
+    const aiConfidence = Number(parsed?.confidence);
+    const confidence = Math.max(
+      0.1,
+      Math.min(0.95, Number.isFinite(aiConfidence) ? aiConfidence : evidenceBasedConfidence),
+    );
+
+    const title = asText(
+      parsed?.title,
+      subject ? `${subject} progress summary` : `${childName} progress summary`,
+    );
+
+    const summary = {
+      family_id: familyId,
+      child_id: childId,
+      created_by: uid,
+      period_type: periodType,
+      period_start: periodStart,
+      period_end: periodEnd,
+      subject,
+      title,
+      executive_summary: asText(
+        parsed?.executive_summary,
+        "Not enough evidence to generate a detailed summary yet.",
+      ),
+      narrative_text: asText(
+        parsed?.narrative_text,
+        "Add more learning notes, homework records and event feedback for a richer progress summary.",
+      ),
+      strengths: asList(parsed?.strengths),
+      concerns: asList(parsed?.concerns),
+      observed_patterns: asList(parsed?.observed_patterns),
+      recommendations: asList(parsed?.recommendations),
+      parent_actions: asList(parsed?.parent_actions),
+      child_actions: asList(parsed?.child_actions),
+      teacher_questions: asList(parsed?.teacher_questions),
+      next_goals: asList(parsed?.next_goals),
+      missing_evidence:
+        evidenceCount === 0
+          ? ["No learning notes, homework records or calendar events were found for this period."]
+          : asList(parsed?.missing_evidence),
+      summary_json: {
+        ...parsed,
+        progress_level: asText(
+          parsed?.progress_level,
+          evidenceCount < 2 ? "insufficient_evidence" : "mixed",
+        ),
+        evidence_counts: {
+          notes: records.length,
+          homework: homeworkRows.length,
+          events: eventRows.length,
+        },
+      },
+      source_note_ids: records.map((row) => row.id),
+      source_homework_ids: homeworkRows.map((row) => row.id),
+      source_event_ids: eventRows.map((row) => row.id),
+      evidence_count: evidenceCount,
+      confidence,
+      status: "draft",
+      created_at: now,
+      updated_at: now,
+    };
+
+    let id = `local-${Date.now()}`;
+    if (request.data?.save !== false) {
+      const ref = db.collection(`families/${familyId}/learning_progress_summaries`).doc();
+      id = ref.id;
+      await ref.set({ id, ...summary });
+    }
+
+    return {
+      ok: true,
+      saved: request.data?.save !== false,
       model: "gpt-4.1-mini",
-      temperature: 0.2,
-      response_format: { type: "json_object" },
-      messages: [
-        { role: "system", content: system },
-        { role: "user", content: JSON.stringify(evidence).slice(0, 45000) },
-      ],
-    });
-
-    parsed = JSON.parse(response.choices[0]?.message?.content ?? "{}");
-  } catch (error: any) {
-    console.error("generateProgressSummary OpenAI failed", {
-      message: error?.message ?? String(error),
-      status: error?.status ?? null,
-      code: error?.code ?? null,
-    });
-
-    throw new HttpsError("internal", `AI progress summary failed: ${String(error?.message ?? error).slice(0, 300)}`);
-  }
-
-  function asList(value: unknown) {
-    return Array.isArray(value)
-      ? value.map((item) => String(item ?? "").trim()).filter(Boolean).slice(0, 12)
-      : [];
-  }
-
-  function asText(value: unknown, fallback: string) {
-    const text = String(value ?? "").trim();
-    return text || fallback;
-  }
-
-  const evidenceBasedConfidence =
-    evidenceCount >= 10 ? 0.82 :
-    evidenceCount >= 5 ? 0.7 :
-    evidenceCount >= 2 ? 0.55 :
-    0.35;
-
-  const aiConfidence = Number(parsed?.confidence);
-  const confidence = Math.max(
-    0.1,
-    Math.min(0.95, Number.isFinite(aiConfidence) ? aiConfidence : evidenceBasedConfidence),
-  );
-
-  const title = asText(
-    parsed?.title,
-    subject ? `${subject} progress summary` : `${childName} progress summary`,
-  );
-
-  const summary = {
-    family_id: familyId,
-    child_id: childId,
-    created_by: uid,
-    period_type: periodType,
-    period_start: periodStart,
-    period_end: periodEnd,
-    subject,
-    title,
-    executive_summary: asText(parsed?.executive_summary, "Not enough evidence to generate a detailed summary yet."),
-    narrative_text: asText(parsed?.narrative_text, "Add more learning notes, homework records and event feedback for a richer progress summary."),
-    strengths: asList(parsed?.strengths),
-    concerns: asList(parsed?.concerns),
-    observed_patterns: asList(parsed?.observed_patterns),
-    recommendations: asList(parsed?.recommendations),
-    parent_actions: asList(parsed?.parent_actions),
-    child_actions: asList(parsed?.child_actions),
-    teacher_questions: asList(parsed?.teacher_questions),
-    next_goals: asList(parsed?.next_goals),
-    missing_evidence: evidenceCount === 0
-      ? ["No learning notes, homework records or calendar events were found for this period."]
-      : asList(parsed?.missing_evidence),
-    summary_json: {
-      ...parsed,
-      progress_level: asText(parsed?.progress_level, evidenceCount < 2 ? "insufficient_evidence" : "mixed"),
+      summary: { id, ...summary },
       evidence_counts: {
         notes: records.length,
         homework: homeworkRows.length,
         events: eventRows.length,
       },
-    },
-    source_note_ids: records.map((row) => row.id),
-    source_homework_ids: homeworkRows.map((row) => row.id),
-    source_event_ids: eventRows.map((row) => row.id),
-    evidence_count: evidenceCount,
-    confidence,
-    status: "draft",
-    created_at: now,
-    updated_at: now,
-  };
-
-  let id = `local-${Date.now()}`;
-  if (request.data?.save !== false) {
-    const ref = db.collection(`families/${familyId}/learning_progress_summaries`).doc();
-    id = ref.id;
-    await ref.set({ id, ...summary });
-  }
-
-  return {
-    ok: true,
-    saved: request.data?.save !== false,
-    model: "gpt-4.1-mini",
-    summary: { id, ...summary },
-    evidence_counts: {
-      notes: records.length,
-      homework: homeworkRows.length,
-      events: eventRows.length,
-    },
-  };
-}); export const generateReportShareVersion = onCall({ region: "us-central1" }, async (request) => {
+    };
+  },
+);
+export const generateReportShareVersion = onCall({ region: "us-central1" }, async (request) => {
   const uid = assertAuthed(request.auth?.uid);
   const familyId = cleanFamilyId(request.data?.family_id);
   await assertFamilyMember(familyId, uid);
   const summaryId = safeText(request.data?.summary_id);
   if (!summaryId) throw new HttpsError("invalid-argument", "summary_id is required.");
-  const summarySnap = await db.doc(`families/${familyId}/learning_progress_summaries/${summaryId}`).get();
+  const summarySnap = await db
+    .doc(`families/${familyId}/learning_progress_summaries/${summaryId}`)
+    .get();
   const summary = summarySnap.data() ?? {};
   const now = isoNow();
   const audience = safeText(request.data?.audience, "parent");
   const language = safeText(request.data?.language, "en");
   const title = `${safeText(summary.title, "Progress summary")} - ${audience}`;
   const content = `# ${title}\n\n${safeText(summary.executive_summary, "Draft summary.")}\n\n${safeText(summary.narrative_text, "")}`;
-  const share = { family_id: familyId, summary_id: summaryId, child_id: summary.child_id ?? null, created_by: uid, audience, language, title, content_markdown: content, email_subject: title, email_body: content, key_points: [], questions: [], action_items: [], privacy_notes: ["Review before sharing externally."], status: "draft", created_at: now, updated_at: now };
+  const share = {
+    family_id: familyId,
+    summary_id: summaryId,
+    child_id: summary.child_id ?? null,
+    created_by: uid,
+    audience,
+    language,
+    title,
+    content_markdown: content,
+    email_subject: title,
+    email_body: content,
+    key_points: [],
+    questions: [],
+    action_items: [],
+    privacy_notes: ["Review before sharing externally."],
+    status: "draft",
+    created_at: now,
+    updated_at: now,
+  };
   let id = `local-${Date.now()}`;
   if (request.data?.save !== false) {
     const ref = db.collection(`families/${familyId}/progress_report_shares`).doc();
@@ -432,7 +520,6 @@ Language target: ${language}.`;
   }
   return { ok: true, saved: request.data?.save !== false, share: { id, ...share } };
 });
-
 
 function adelaideDateString(date = new Date()) {
   const parts = new Intl.DateTimeFormat("en-CA", {
@@ -503,7 +590,7 @@ function estimateTravelMinutes(args: {
   const distanceKm = haversineKm(fromLat, fromLng, toLat, toLng);
   const drivingMultiplier = 1.35;
   const averageKmh = 32;
-  const rawMinutes = Math.ceil((distanceKm * drivingMultiplier / averageKmh) * 60) + 5;
+  const rawMinutes = Math.ceil(((distanceKm * drivingMultiplier) / averageKmh) * 60) + 5;
   const travelMinutes = Math.max(8, Math.min(rawMinutes, 120));
 
   return {
@@ -539,9 +626,15 @@ async function buildDailyRouteDeparturePlansInternal(args: {
   const now = isoNow();
   const date = safeText(args.date, adelaideDateString());
   const nextDate = addDaysToDateString(date, 1);
-  const defaultTravelMinutes = Math.max(5, Math.min(Number(args.defaultTravelMinutes ?? 25) || 25, 120));
+  const defaultTravelMinutes = Math.max(
+    5,
+    Math.min(Number(args.defaultTravelMinutes ?? 25) || 25, 120),
+  );
   const bufferMinutes = Math.max(0, Math.min(Number(args.bufferMinutes ?? 10) || 10, 60));
-  const alertMinutesBefore = Math.max(1, Math.min(Number(args.alertMinutesBefore ?? 15) || 15, 120));
+  const alertMinutesBefore = Math.max(
+    1,
+    Math.min(Number(args.alertMinutesBefore ?? 15) || 15, 120),
+  );
 
   const eventsSnap = await db
     .collection(`families/${args.familyId}/events`)
@@ -572,7 +665,10 @@ async function buildDailyRouteDeparturePlansInternal(args: {
       return true;
     });
 
-  const placeMap = await loadPlaceMap(args.familyId, rawEvents.map((event) => event.place_id));
+  const placeMap = await loadPlaceMap(
+    args.familyId,
+    rawEvents.map((event) => event.place_id),
+  );
   const usableEvents = rawEvents
     .filter((event) => placeMap.has(event.place_id))
     .sort((a, b) => a.start_at.localeCompare(b.start_at));
@@ -611,7 +707,10 @@ async function buildDailyRouteDeparturePlansInternal(args: {
 
       const estimate = estimateTravelMinutes({ fromPlace, toPlace, defaultTravelMinutes });
       const latestSafeDepartureAt = minutesBeforeIso(toEvent.start_at, estimate.travel_minutes);
-      const recommendedDepartureAt = minutesBeforeIso(toEvent.start_at, estimate.travel_minutes + bufferMinutes);
+      const recommendedDepartureAt = minutesBeforeIso(
+        toEvent.start_at,
+        estimate.travel_minutes + bufferMinutes,
+      );
 
       if (!latestSafeDepartureAt || !recommendedDepartureAt) continue;
 
@@ -646,75 +745,79 @@ async function buildDailyRouteDeparturePlansInternal(args: {
     const firstEvent = placeEvents[0];
     const lastEvent = placeEvents[placeEvents.length - 1];
 
-    const planRecommended = legs
-      .map((leg) => leg.recommended_departure_at)
-      .sort()[0] ?? null;
+    const planRecommended = legs.map((leg) => leg.recommended_departure_at).sort()[0] ?? null;
 
-    const planLatestSafe = legs
-      .map((leg) => leg.latest_safe_departure_at)
-      .sort()[0] ?? null;
+    const planLatestSafe = legs.map((leg) => leg.latest_safe_departure_at).sort()[0] ?? null;
 
-    batch.set(planRef, {
-      id: planId,
-      family_id: args.familyId,
-      child_id: childId === "family" ? null : childId,
-      date,
-      title: `Daily route plan - ${date}`,
-      status: "active",
-      source: "daily_route_builder",
-      route_mode: "driving_estimate",
-      event_ids: placeEvents.map((event) => event.id),
-      start_at: firstEvent.start_at,
-      end_at: lastEvent.end_at || lastEvent.start_at,
-      recommended_departure_at: planRecommended,
-      latest_safe_departure_at: planLatestSafe,
-      alert_minutes_before: alertMinutesBefore,
-      default_travel_minutes: defaultTravelMinutes,
-      buffer_minutes: bufferMinutes,
-      overall_risk: "normal",
-      late_risk_level: "normal",
-      late_risk_message: "Daily route plan generated. Waiting for late-risk scan.",
-      generated_at: now,
-      created_by: args.createdBy,
-      updated_at: now,
-      created_at: now,
-    }, { merge: true });
+    batch.set(
+      planRef,
+      {
+        id: planId,
+        family_id: args.familyId,
+        child_id: childId === "family" ? null : childId,
+        date,
+        title: `Daily route plan - ${date}`,
+        status: "active",
+        source: "daily_route_builder",
+        route_mode: "driving_estimate",
+        event_ids: placeEvents.map((event) => event.id),
+        start_at: firstEvent.start_at,
+        end_at: lastEvent.end_at || lastEvent.start_at,
+        recommended_departure_at: planRecommended,
+        latest_safe_departure_at: planLatestSafe,
+        alert_minutes_before: alertMinutesBefore,
+        default_travel_minutes: defaultTravelMinutes,
+        buffer_minutes: bufferMinutes,
+        overall_risk: "normal",
+        late_risk_level: "normal",
+        late_risk_message: "Daily route plan generated. Waiting for late-risk scan.",
+        generated_at: now,
+        created_by: args.createdBy,
+        updated_at: now,
+        created_at: now,
+      },
+      { merge: true },
+    );
 
     legs.forEach((leg, legIndex) => {
       const legId = `${planId}-leg-${String(legIndex + 1).padStart(2, "0")}`;
       const legRef = db.doc(`families/${args.familyId}/route_departure_legs/${legId}`);
 
-      batch.set(legRef, {
-        id: legId,
-        family_id: args.familyId,
-        plan_id: planId,
-        child_id: childId === "family" ? null : childId,
-        date,
-        status: "active",
-        source: "daily_route_builder",
-        route_mode: "driving_estimate",
-        sort_order: legIndex + 1,
-        from_event_id: leg.fromEvent.id,
-        to_event_id: leg.toEvent.id,
-        from_place_id: leg.fromEvent.place_id,
-        to_place_id: leg.toEvent.place_id,
-        from_label: safeText(leg.fromPlace.name, leg.fromEvent.title),
-        to_label: safeText(leg.toPlace.name, leg.toEvent.title),
-        event_title: leg.toEvent.title,
-        target_start_at: leg.toEvent.start_at,
-        travel_minutes: leg.travel_minutes,
-        buffer_minutes: bufferMinutes,
-        recommended_departure_at: leg.recommended_departure_at,
-        latest_safe_departure_at: leg.latest_safe_departure_at,
-        distance_km_estimate: leg.distance_km_estimate,
-        estimate_method: leg.estimate_method,
-        risk_level: "normal",
-        late_risk_level: "normal",
-        late_risk_message: "Waiting for late-risk scan.",
-        created_by: args.createdBy,
-        created_at: now,
-        updated_at: now,
-      }, { merge: true });
+      batch.set(
+        legRef,
+        {
+          id: legId,
+          family_id: args.familyId,
+          plan_id: planId,
+          child_id: childId === "family" ? null : childId,
+          date,
+          status: "active",
+          source: "daily_route_builder",
+          route_mode: "driving_estimate",
+          sort_order: legIndex + 1,
+          from_event_id: leg.fromEvent.id,
+          to_event_id: leg.toEvent.id,
+          from_place_id: leg.fromEvent.place_id,
+          to_place_id: leg.toEvent.place_id,
+          from_label: safeText(leg.fromPlace.name, leg.fromEvent.title),
+          to_label: safeText(leg.toPlace.name, leg.toEvent.title),
+          event_title: leg.toEvent.title,
+          target_start_at: leg.toEvent.start_at,
+          travel_minutes: leg.travel_minutes,
+          buffer_minutes: bufferMinutes,
+          recommended_departure_at: leg.recommended_departure_at,
+          latest_safe_departure_at: leg.latest_safe_departure_at,
+          distance_km_estimate: leg.distance_km_estimate,
+          estimate_method: leg.estimate_method,
+          risk_level: "normal",
+          late_risk_level: "normal",
+          late_risk_message: "Waiting for late-risk scan.",
+          created_by: args.createdBy,
+          created_at: now,
+          updated_at: now,
+        },
+        { merge: true },
+      );
     });
 
     createdPlans += 1;
@@ -779,8 +882,6 @@ export const buildDailyRouteDeparturePlans = onCall({ region: "us-central1" }, a
 
   return result;
 });
-
-
 
 function durationToSeconds(value: unknown) {
   const text = String(value ?? "").trim();
@@ -859,7 +960,9 @@ async function computeGoogleRouteForLeg(args: {
   });
 
   if (!response.ok) {
-    throw new Error(`Google Routes API HTTP ${response.status}: ${JSON.stringify(body).slice(0, 500)}`);
+    throw new Error(
+      `Google Routes API HTTP ${response.status}: ${JSON.stringify(body).slice(0, 500)}`,
+    );
   }
 
   const route = body?.routes?.[0];
@@ -868,7 +971,9 @@ async function computeGoogleRouteForLeg(args: {
   const distanceMeters = Number(route?.distanceMeters ?? 0);
 
   if (!durationSeconds || durationSeconds <= 0) {
-    throw new Error(`Google Routes API returned no usable duration: ${JSON.stringify(body).slice(0, 500)}`);
+    throw new Error(
+      `Google Routes API returned no usable duration: ${JSON.stringify(body).slice(0, 500)}`,
+    );
   }
 
   return {
@@ -876,7 +981,9 @@ async function computeGoogleRouteForLeg(args: {
     static_duration_seconds: staticDurationSeconds,
     travel_minutes: Math.max(1, Math.ceil(durationSeconds / 60)),
     distance_meters: Number.isFinite(distanceMeters) ? distanceMeters : null,
-    distance_km_estimate: Number.isFinite(distanceMeters) ? Math.round((distanceMeters / 1000) * 10) / 10 : null,
+    distance_km_estimate: Number.isFinite(distanceMeters)
+      ? Math.round((distanceMeters / 1000) * 10) / 10
+      : null,
   };
 }
 
@@ -963,26 +1070,29 @@ async function refreshRouteLegTravelTimesInternal(args: {
       const targetStartAt = safeText(leg.target_start_at);
       const latestSafeDepartureAt = targetStartAt
         ? minutesBeforeIso(targetStartAt, route.travel_minutes)
-        : leg.latest_safe_departure_at ?? null;
+        : (leg.latest_safe_departure_at ?? null);
       const recommendedDepartureAt = targetStartAt
         ? minutesBeforeIso(targetStartAt, route.travel_minutes + bufferMinutes)
-        : leg.recommended_departure_at ?? null;
+        : (leg.recommended_departure_at ?? null);
 
-      await legDoc.ref.set({
-        route_mode: "google_routes_traffic_aware",
-        travel_minutes: route.travel_minutes,
-        routes_duration_seconds: route.duration_seconds,
-        routes_static_duration_seconds: route.static_duration_seconds,
-        distance_meters: route.distance_meters,
-        distance_km_estimate: route.distance_km_estimate,
-        estimate_method: "google_routes_traffic_aware",
-        recommended_departure_at: recommendedDepartureAt,
-        latest_safe_departure_at: latestSafeDepartureAt,
-        routes_refresh_status: "ok",
-        routes_error: null,
-        routes_refreshed_at: now,
-        updated_at: now,
-      }, { merge: true });
+      await legDoc.ref.set(
+        {
+          route_mode: "google_routes_traffic_aware",
+          travel_minutes: route.travel_minutes,
+          routes_duration_seconds: route.duration_seconds,
+          routes_static_duration_seconds: route.static_duration_seconds,
+          distance_meters: route.distance_meters,
+          distance_km_estimate: route.distance_km_estimate,
+          estimate_method: "google_routes_traffic_aware",
+          recommended_departure_at: recommendedDepartureAt,
+          latest_safe_departure_at: latestSafeDepartureAt,
+          routes_refresh_status: "ok",
+          routes_error: null,
+          routes_refreshed_at: now,
+          updated_at: now,
+        },
+        { merge: true },
+      );
 
       affectedPlanIds.add(safeText(leg.plan_id));
       updatedLegs += 1;
@@ -991,12 +1101,15 @@ async function refreshRouteLegTravelTimesInternal(args: {
       failedLegs += 1;
       failures.push({ leg_id: legDoc.id, error: message });
 
-      await legDoc.ref.set({
-        routes_refresh_status: "failed",
-        routes_error: message,
-        routes_refreshed_at: now,
-        updated_at: now,
-      }, { merge: true });
+      await legDoc.ref.set(
+        {
+          routes_refresh_status: "failed",
+          routes_error: message,
+          routes_refreshed_at: now,
+          updated_at: now,
+        },
+        { merge: true },
+      );
     }
   }
 
@@ -1016,18 +1129,24 @@ async function refreshRouteLegTravelTimesInternal(args: {
       .map((leg) => safeText(leg.latest_safe_departure_at))
       .filter(Boolean)
       .sort();
-    const totalTravelMinutes = planLegs.reduce((sum, leg) => sum + (Number(leg.travel_minutes ?? 0) || 0), 0);
+    const totalTravelMinutes = planLegs.reduce(
+      (sum, leg) => sum + (Number(leg.travel_minutes ?? 0) || 0),
+      0,
+    );
 
-    await db.doc(`families/${args.familyId}/route_departure_plans/${affectedPlanId}`).set({
-      route_mode: "google_routes_traffic_aware",
-      estimate_method: "google_routes_traffic_aware",
-      recommended_departure_at: recommendedValues[0] ?? null,
-      latest_safe_departure_at: latestSafeValues[0] ?? null,
-      total_travel_minutes: totalTravelMinutes,
-      routes_refreshed_at: now,
-      routes_refresh_status: failedLegs > 0 ? "partial" : "ok",
-      updated_at: now,
-    }, { merge: true });
+    await db.doc(`families/${args.familyId}/route_departure_plans/${affectedPlanId}`).set(
+      {
+        route_mode: "google_routes_traffic_aware",
+        estimate_method: "google_routes_traffic_aware",
+        recommended_departure_at: recommendedValues[0] ?? null,
+        latest_safe_departure_at: latestSafeValues[0] ?? null,
+        total_travel_minutes: totalTravelMinutes,
+        routes_refreshed_at: now,
+        routes_refresh_status: failedLegs > 0 ? "partial" : "ok",
+        updated_at: now,
+      },
+      { merge: true },
+    );
   }
 
   return {
@@ -1077,7 +1196,6 @@ export const refreshRouteLegTravelTimes = onCall(
   },
 );
 
-
 export const routeLateRiskCheck = onCall({ region: "us-central1" }, async (request) => {
   const uid = assertAuthed(request.auth?.uid);
   const familyId = cleanFamilyId(request.data?.family_id);
@@ -1111,21 +1229,31 @@ export const routeLateRiskCheck = onCall({ region: "us-central1" }, async (reque
     return "normal";
   }
 
-  function riskMessage(risk: string, leg: any, minutesToRecommended: number | null, minutesToLatestSafe: number | null) {
+  function riskMessage(
+    risk: string,
+    leg: any,
+    minutesToRecommended: number | null,
+    minutesToLatestSafe: number | null,
+  ) {
     const stop = safeText(leg.to_label, safeText(leg.event_title, "next stop"));
-    if (risk === "late") return `You are late for ${stop}. Latest safe departure passed ${Math.abs(minutesToLatestSafe ?? 0)} minute(s) ago.`;
-    if (risk === "high") return `Leave now for ${stop}. Latest safe departure is in ${Math.max(minutesToLatestSafe ?? 0, 0)} minute(s).`;
-    if (risk === "medium") return `Prepare to leave for ${stop}. Recommended departure is in ${Math.max(minutesToRecommended ?? 0, 0)} minute(s).`;
+    if (risk === "late")
+      return `You are late for ${stop}. Latest safe departure passed ${Math.abs(minutesToLatestSafe ?? 0)} minute(s) ago.`;
+    if (risk === "high")
+      return `Leave now for ${stop}. Latest safe departure is in ${Math.max(minutesToLatestSafe ?? 0, 0)} minute(s).`;
+    if (risk === "medium")
+      return `Prepare to leave for ${stop}. Recommended departure is in ${Math.max(minutesToRecommended ?? 0, 0)} minute(s).`;
     return `Route timing for ${stop} looks OK.`;
   }
 
   const planDocs = planId
     ? [await db.doc(`families/${familyId}/route_departure_plans/${planId}`).get()]
-    : (await db
-        .collection(`families/${familyId}/route_departure_plans`)
-        .where("status", "==", "active")
-        .limit(maxPlans)
-        .get()).docs;
+    : (
+        await db
+          .collection(`families/${familyId}/route_departure_plans`)
+          .where("status", "==", "active")
+          .limit(maxPlans)
+          .get()
+      ).docs;
 
   const risks: Array<{
     plan_id: string;
@@ -1146,7 +1274,10 @@ export const routeLateRiskCheck = onCall({ region: "us-central1" }, async (reque
     const plan = planDoc.data() ?? {};
     checkedPlans += 1;
 
-    const alertMinutesBefore = Math.max(1, Math.min(Number(plan.alert_minutes_before ?? 15) || 15, 120));
+    const alertMinutesBefore = Math.max(
+      1,
+      Math.min(Number(plan.alert_minutes_before ?? 15) || 15, 120),
+    );
 
     const legsSnap = await db
       .collection(`families/${familyId}/route_departure_legs`)
@@ -1193,7 +1324,10 @@ export const routeLateRiskCheck = onCall({ region: "us-central1" }, async (reque
           minutes_to_recommended: minutesToRecommended,
           minutes_to_latest_safe: minutesToLatestSafe,
           message,
-          recommendation: risk === "late" || risk === "high" ? "Leave now or adjust pickup plan." : "Get ready to leave soon.",
+          recommendation:
+            risk === "late" || risk === "high"
+              ? "Leave now or adjust pickup plan."
+              : "Get ready to leave soon.",
           status: "active",
           created_at: nowIsoValue,
         };
@@ -1210,14 +1344,17 @@ export const routeLateRiskCheck = onCall({ region: "us-central1" }, async (reque
         });
       }
 
-      await legDoc.ref.set({
-        late_risk_level: risk,
-        late_risk_message: message,
-        minutes_to_recommended: minutesToRecommended,
-        minutes_to_latest_safe: minutesToLatestSafe,
-        last_late_risk_check_at: nowIsoValue,
-        updated_at: nowIsoValue,
-      }, { merge: true });
+      await legDoc.ref.set(
+        {
+          late_risk_level: risk,
+          late_risk_message: message,
+          minutes_to_recommended: minutesToRecommended,
+          minutes_to_latest_safe: minutesToLatestSafe,
+          last_late_risk_check_at: nowIsoValue,
+          updated_at: nowIsoValue,
+        },
+        { merge: true },
+      );
     }
 
     const planRecommended = minutesUntil(plan.recommended_departure_at);
@@ -1232,23 +1369,26 @@ export const routeLateRiskCheck = onCall({ region: "us-central1" }, async (reque
       : worstRisk;
 
     const planMessage = legsSnap.empty
-      ? (planRisk === "late"
-          ? "This route plan appears late."
-          : planRisk === "high"
-            ? "This route plan should depart now."
-            : planRisk === "medium"
-              ? "This route plan should prepare to depart soon."
-              : "Route timing looks OK.")
+      ? planRisk === "late"
+        ? "This route plan appears late."
+        : planRisk === "high"
+          ? "This route plan should depart now."
+          : planRisk === "medium"
+            ? "This route plan should prepare to depart soon."
+            : "Route timing looks OK."
       : worstMessage;
 
-    await planDoc.ref.set({
-      late_risk_level: planRisk,
-      late_risk_message: planMessage,
-      minutes_to_recommended: planRecommended,
-      minutes_to_latest_safe: planLatestSafe,
-      last_late_risk_check_at: nowIsoValue,
-      updated_at: nowIsoValue,
-    }, { merge: true });
+    await planDoc.ref.set(
+      {
+        late_risk_level: planRisk,
+        late_risk_message: planMessage,
+        minutes_to_recommended: planRecommended,
+        minutes_to_latest_safe: planLatestSafe,
+        last_late_risk_check_at: nowIsoValue,
+        updated_at: nowIsoValue,
+      },
+      { merge: true },
+    );
   }
 
   const logRef = db.collection(`families/${familyId}/scheduled_runner_logs`).doc();
@@ -1295,7 +1435,10 @@ function configureWebPush() {
   const privateKey = vapidPrivateKey.value();
 
   if (!subject || !publicKey || !privateKey) {
-    throw new HttpsError("failed-precondition", "Missing VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY or VAPID_SUBJECT.");
+    throw new HttpsError(
+      "failed-precondition",
+      "Missing VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY or VAPID_SUBJECT.",
+    );
   }
 
   webpush.setVapidDetails(subject, publicKey, privateKey);
@@ -1340,7 +1483,11 @@ async function sendPushToFamily(args: {
 
     if (!subscription) {
       skipped += 1;
-      results.push({ subscription_id: docSnap.id, status: "skipped", error: "Missing endpoint or keys." });
+      results.push({
+        subscription_id: docSnap.id,
+        status: "skipped",
+        error: "Missing endpoint or keys.",
+      });
       continue;
     }
 
@@ -1389,12 +1536,15 @@ async function sendPushToFamily(args: {
       const messageText = String(error?.body ?? error?.message ?? error);
 
       if (statusCode === 404 || statusCode === 410) {
-        await docSnap.ref.set({
-          is_active: false,
-          disabled_at: now,
-          updated_at: now,
-          disable_reason: `web-push-${statusCode}`,
-        }, { merge: true });
+        await docSnap.ref.set(
+          {
+            is_active: false,
+            disabled_at: now,
+            updated_at: now,
+            disable_reason: `web-push-${statusCode}`,
+          },
+          { merge: true },
+        );
       }
 
       await logRef.set({
@@ -1420,7 +1570,11 @@ async function sendPushToFamily(args: {
         updated_at: now,
       });
 
-      results.push({ subscription_id: docSnap.id, status: "failed", error: messageText.slice(0, 200) });
+      results.push({
+        subscription_id: docSnap.id,
+        status: "failed",
+        error: messageText.slice(0, 200),
+      });
     }
   }
 
@@ -1460,23 +1614,56 @@ export const routeDepartureAlerts = onCall(
       ...sendResult,
     };
   },
-); export const savePushSubscription = onCall({ region: "us-central1" }, async (request) => {
+);
+export const savePushSubscription = onCall({ region: "us-central1" }, async (request) => {
   const uid = assertAuthed(request.auth?.uid);
   const familyId = cleanFamilyId(request.data?.family_id);
   await assertFamilyMember(familyId, uid);
   const endpoint = safeText(request.data?.endpoint);
   if (!endpoint) throw new HttpsError("invalid-argument", "endpoint is required.");
-  const existing = await db.collection(`families/${familyId}/push_subscriptions`).where("endpoint", "==", endpoint).limit(1).get();
-  const ref = existing.empty ? db.collection(`families/${familyId}/push_subscriptions`).doc() : existing.docs[0].ref;
+  const existing = await db
+    .collection(`families/${familyId}/push_subscriptions`)
+    .where("endpoint", "==", endpoint)
+    .limit(1)
+    .get();
+  const ref = existing.empty
+    ? db.collection(`families/${familyId}/push_subscriptions`).doc()
+    : existing.docs[0].ref;
   const now = isoNow();
   if (request.data?.action === "deactivate") {
-    await ref.set({ id: ref.id, family_id: familyId, auth_user_id: uid, endpoint, is_active: false, disabled_at: now, updated_at: now }, { merge: true });
+    await ref.set(
+      {
+        id: ref.id,
+        family_id: familyId,
+        auth_user_id: uid,
+        endpoint,
+        is_active: false,
+        disabled_at: now,
+        updated_at: now,
+      },
+      { merge: true },
+    );
     return { ok: true, active: false, id: ref.id };
   }
-  await ref.set({ id: ref.id, family_id: familyId, auth_user_id: uid, member_id: request.data?.member_id ?? null, endpoint, keys: request.data?.keys ?? {}, user_agent: request.data?.user_agent ?? null, device_label: request.data?.device_label ?? null, is_active: true, last_seen_at: now, created_at: now, updated_at: now }, { merge: true });
+  await ref.set(
+    {
+      id: ref.id,
+      family_id: familyId,
+      auth_user_id: uid,
+      member_id: request.data?.member_id ?? null,
+      endpoint,
+      keys: request.data?.keys ?? {},
+      user_agent: request.data?.user_agent ?? null,
+      device_label: request.data?.device_label ?? null,
+      is_active: true,
+      last_seen_at: now,
+      created_at: now,
+      updated_at: now,
+    },
+    { merge: true },
+  );
   return { ok: true, active: true, id: ref.id };
 });
-
 
 function reminderMinutesUntil(value: unknown) {
   const iso = safeText(value);
@@ -1493,7 +1680,9 @@ function reminderDateOnly(value: unknown) {
 
 function reminderIsInactiveStatus(value: unknown) {
   const status = safeText(value).toLowerCase();
-  return ["cancelled", "canceled", "deleted", "archived", "done", "completed", "paid"].includes(status);
+  return ["cancelled", "canceled", "deleted", "archived", "done", "completed", "paid"].includes(
+    status,
+  );
 }
 
 function reminderStatusText(value: unknown, fallback = "scheduled") {
@@ -1641,9 +1830,10 @@ async function buildFamilyReminderCandidates(familyId: string) {
     const dueDate = reminderDateOnly(dueAt);
     const label = safeText(row.title ?? row.name ?? row.description, "Payment");
     const amount = row.amount ?? row.amount_cents ?? null;
-    const amountLabel = typeof amount === "number" && amount > 0
-      ? ` (${amount > 1000 && row.amount_cents ? `$${Math.round(amount) / 100}` : `$${amount}`})`
-      : "";
+    const amountLabel =
+      typeof amount === "number" && amount > 0
+        ? ` (${amount > 1000 && row.amount_cents ? `$${Math.round(amount) / 100}` : `$${amount}`})`
+        : "";
 
     if (minutes !== null && minutes >= 0 && minutes <= 48 * 60) {
       candidates.push({
@@ -1730,7 +1920,6 @@ async function runFamilyReminderScan(familyId: string, senderUid: string) {
   };
 }
 
-
 export const sendFamilyReminders = onCall(
   { region: "us-central1", secrets: [vapidPublicKey, vapidPrivateKey, vapidSubject] },
   async (request) => {
@@ -1771,13 +1960,27 @@ export const systemHealthCheck = onCall({ region: "us-central1" }, async (reques
   const uid = assertAuthed(request.auth?.uid);
   const familyId = cleanFamilyId(request.data?.family_id);
   await assertFamilyMember(familyId, uid);
-  const tables = ["members", "places", "events", "route_stops", "homework_tasks", "payments", "requests"];
+  const tables = [
+    "members",
+    "places",
+    "events",
+    "route_stops",
+    "homework_tasks",
+    "payments",
+    "requests",
+  ];
   const result = [];
   for (const table of tables) {
     const snap = await db.collection(`families/${familyId}/${table}`).limit(1).get();
     result.push({ ok: true, table, count: snap.size, error: null });
   }
-  return { ok: true, checked_at: isoNow(), env: { FIREBASE_PROJECT_ID: Boolean(process.env.GCLOUD_PROJECT) }, tables: result, problem_counts: {} };
+  return {
+    ok: true,
+    checked_at: isoNow(),
+    env: { FIREBASE_PROJECT_ID: Boolean(process.env.GCLOUD_PROJECT) },
+    tables: result,
+    problem_counts: {},
+  };
 });
 
 export const scheduledFamilyRunner = onCall({ region: "us-central1" }, async (request) => {
@@ -1786,10 +1989,20 @@ export const scheduledFamilyRunner = onCall({ region: "us-central1" }, async (re
   await assertFamilyMember(familyId, uid);
   const now = isoNow();
   const ref = db.collection(`families/${familyId}/scheduled_runner_logs`).doc();
-  await ref.set({ id: ref.id, runner_name: "scheduledFamilyRunner", run_mode: safeText(request.data?.mode, "manual"), family_id: familyId, started_at: now, finished_at: now, status: "completed", summary: { ok: true }, error_message: null, created_at: now });
+  await ref.set({
+    id: ref.id,
+    runner_name: "scheduledFamilyRunner",
+    run_mode: safeText(request.data?.mode, "manual"),
+    family_id: familyId,
+    started_at: now,
+    finished_at: now,
+    status: "completed",
+    summary: { ok: true },
+    error_message: null,
+    created_at: now,
+  });
   return { ok: true, log_id: ref.id };
 });
-
 
 type ScheduledJobRunSummary = {
   job_id: string;
@@ -1822,7 +2035,6 @@ function shouldRunScheduledSetting(setting: any, triggerName: "route" | "reminde
   return true;
 }
 
-
 function minutesUntilFrom(baseMs: number, value: unknown) {
   const iso = safeText(value);
   if (!iso) return null;
@@ -1846,15 +2058,41 @@ function classifyScheduledRouteRisk(args: {
   return "normal";
 }
 
-function buildScheduledRouteRiskMessage(risk: string, label: string, minutesToRecommended: number | null, minutesToLatestSafe: number | null) {
-  if (risk === "late") return `You are late for ${label}. Latest safe departure passed ${Math.abs(minutesToLatestSafe ?? 0)} minute(s) ago.`;
-  if (risk === "high") return `Leave now for ${label}. Latest safe departure is in ${Math.max(minutesToLatestSafe ?? 0, 0)} minute(s).`;
-  if (risk === "medium") return `Prepare to leave for ${label}. Recommended departure is in ${Math.max(minutesToRecommended ?? 0, 0)} minute(s).`;
+function buildScheduledRouteRiskMessage(
+  risk: string,
+  label: string,
+  minutesToRecommended: number | null,
+  minutesToLatestSafe: number | null,
+) {
+  if (risk === "late")
+    return `You are late for ${label}. Latest safe departure passed ${Math.abs(minutesToLatestSafe ?? 0)} minute(s) ago.`;
+  if (risk === "high")
+    return `Leave now for ${label}. Latest safe departure is in ${Math.max(minutesToLatestSafe ?? 0, 0)} minute(s).`;
+  if (risk === "medium")
+    return `Prepare to leave for ${label}. Recommended departure is in ${Math.max(minutesToRecommended ?? 0, 0)} minute(s).`;
   return `Route timing for ${label} looks OK.`;
 }
 
 async function runScheduledLateRiskScan(familyId: string) {
-  const now = new Date(); const baseMs = now.getTime(); const nowIsoValue = now.toISOString(); const routeBuildResult = await buildDailyRouteDeparturePlansInternal({ familyId, date: adelaideDateString(now), createdBy: "system-scheduler", defaultTravelMinutes: 25, bufferMinutes: 10, alertMinutesBefore: 15 }); const routeRefreshResult = await refreshRouteLegTravelTimesInternal({ familyId, date: adelaideDateString(now), limit: 80, allowMissingApiKey: true }); const planSnap = await db .collection(`families/${familyId}/route_departure_plans`)
+  const now = new Date();
+  const baseMs = now.getTime();
+  const nowIsoValue = now.toISOString();
+  const routeBuildResult = await buildDailyRouteDeparturePlansInternal({
+    familyId,
+    date: adelaideDateString(now),
+    createdBy: "system-scheduler",
+    defaultTravelMinutes: 25,
+    bufferMinutes: 10,
+    alertMinutesBefore: 15,
+  });
+  const routeRefreshResult = await refreshRouteLegTravelTimesInternal({
+    familyId,
+    date: adelaideDateString(now),
+    limit: 80,
+    allowMissingApiKey: true,
+  });
+  const planSnap = await db
+    .collection(`families/${familyId}/route_departure_plans`)
     .where("status", "==", "active")
     .limit(80)
     .get();
@@ -1876,7 +2114,10 @@ async function runScheduledLateRiskScan(familyId: string) {
     const plan = planDoc.data() ?? {};
     checkedPlans += 1;
 
-    const alertMinutesBefore = Math.max(1, Math.min(Number(plan.alert_minutes_before ?? 15) || 15, 120));
+    const alertMinutesBefore = Math.max(
+      1,
+      Math.min(Number(plan.alert_minutes_before ?? 15) || 15, 120),
+    );
 
     const legsSnap = await db
       .collection(`families/${familyId}/route_departure_legs`)
@@ -1905,7 +2146,12 @@ async function runScheduledLateRiskScan(familyId: string) {
       });
 
       const label = safeText(leg.to_label, safeText(leg.event_title, "next stop"));
-      const message = buildScheduledRouteRiskMessage(risk, label, minutesToRecommended, minutesToLatestSafe);
+      const message = buildScheduledRouteRiskMessage(
+        risk,
+        label,
+        minutesToRecommended,
+        minutesToLatestSafe,
+      );
 
       if ((riskRank[risk] ?? 1) > (riskRank[worstRisk] ?? 1)) {
         worstRisk = risk;
@@ -1915,14 +2161,17 @@ async function runScheduledLateRiskScan(familyId: string) {
         worstLegId = legDoc.id;
       }
 
-      await legDoc.ref.set({
-        late_risk_level: risk,
-        late_risk_message: message,
-        minutes_to_recommended: minutesToRecommended,
-        minutes_to_latest_safe: minutesToLatestSafe,
-        last_late_risk_check_at: nowIsoValue,
-        updated_at: nowIsoValue,
-      }, { merge: true });
+      await legDoc.ref.set(
+        {
+          late_risk_level: risk,
+          late_risk_message: message,
+          minutes_to_recommended: minutesToRecommended,
+          minutes_to_latest_safe: minutesToLatestSafe,
+          last_late_risk_check_at: nowIsoValue,
+          updated_at: nowIsoValue,
+        },
+        { merge: true },
+      );
 
       if (risk === "medium" || risk === "high" || risk === "late") {
         if (risk === "high" || risk === "late") highOrLate += 1;
@@ -1938,7 +2187,10 @@ async function runScheduledLateRiskScan(familyId: string) {
           minutes_to_recommended: minutesToRecommended,
           minutes_to_latest_safe: minutesToLatestSafe,
           message,
-          recommendation: risk === "late" || risk === "high" ? "Leave now or adjust pickup plan." : "Get ready to leave soon.",
+          recommendation:
+            risk === "late" || risk === "high"
+              ? "Leave now or adjust pickup plan."
+              : "Get ready to leave soon.",
           status: "active",
           created_at: nowIsoValue,
         };
@@ -1964,20 +2216,28 @@ async function runScheduledLateRiskScan(familyId: string) {
         alertMinutesBefore,
         baseRisk: plan.overall_risk,
       });
-      worstMessage = buildScheduledRouteRiskMessage(worstRisk, safeText(plan.title, "route plan"), minutesToRecommended, minutesToLatestSafe);
+      worstMessage = buildScheduledRouteRiskMessage(
+        worstRisk,
+        safeText(plan.title, "route plan"),
+        minutesToRecommended,
+        minutesToLatestSafe,
+      );
       worstRecommended = minutesToRecommended;
       worstLatestSafe = minutesToLatestSafe;
     }
 
-    await planDoc.ref.set({
-      late_risk_level: worstRisk,
-      late_risk_message: worstMessage,
-      minutes_to_recommended: worstRecommended,
-      minutes_to_latest_safe: worstLatestSafe,
-      worst_late_risk_leg_id: worstLegId,
-      last_late_risk_check_at: nowIsoValue,
-      updated_at: nowIsoValue,
-    }, { merge: true });
+    await planDoc.ref.set(
+      {
+        late_risk_level: worstRisk,
+        late_risk_message: worstMessage,
+        minutes_to_recommended: worstRecommended,
+        minutes_to_latest_safe: worstLatestSafe,
+        worst_late_risk_leg_id: worstLegId,
+        last_late_risk_check_at: nowIsoValue,
+        updated_at: nowIsoValue,
+      },
+      { merge: true },
+    );
   }
 
   return {
@@ -1988,8 +2248,6 @@ async function runScheduledLateRiskScan(familyId: string) {
     top_risk: risks[0] ?? null,
   };
 }
-
-
 
 async function hasRecentScheduledRouteNotification(
   familyId: string,
@@ -2018,8 +2276,10 @@ async function hasRecentScheduledRouteNotification(
   });
 }
 
-
-async function runScheduledSetting(settingDoc: any, triggerName: "route" | "reminder" | "all"): Promise<ScheduledJobRunSummary> {
+async function runScheduledSetting(
+  settingDoc: any,
+  triggerName: "route" | "reminder" | "all",
+): Promise<ScheduledJobRunSummary> {
   const setting = settingDoc.data() ?? {};
   const familyId = getFamilyIdFromScheduledSetting(settingDoc, setting);
   const jobName = safeText(setting.job_name, settingDoc.id);
@@ -2076,7 +2336,6 @@ async function runScheduledSetting(settingDoc: any, triggerName: "route" | "remi
       updated_at: now,
     });
 
-
     if (payload.run_family_reminders) {
       const reminderResult = await runFamilyReminderScan(familyId, "system-scheduler");
       summary.family_reminders = reminderResult;
@@ -2092,7 +2351,6 @@ async function runScheduledSetting(settingDoc: any, triggerName: "route" | "remi
     if (payload.run_route_alerts) {
       if (lateRiskSummary?.high_or_late > 0 && lateRiskSummary?.top_risk) {
         const topRisk = lateRiskSummary.top_risk;
-
 
         const routeSourceId = topRisk.leg_id ?? topRisk.plan_id;
         const routeNotificationType = `scheduled_route_${topRisk.risk}`;
@@ -2117,7 +2375,8 @@ async function runScheduledSetting(settingDoc: any, triggerName: "route" | "remi
             senderUid: "system-scheduler",
             payload: {
               notification_type: routeNotificationType,
-              title: topRisk.risk === "late" ? "Family Dock route is late" : "Family Dock route alert",
+              title:
+                topRisk.risk === "late" ? "Family Dock route is late" : "Family Dock route alert",
               body: topRisk.message,
               target_url: "/",
               source_table: topRisk.leg_id ? "route_departure_legs" : "route_departure_plans",
@@ -2127,7 +2386,6 @@ async function runScheduledSetting(settingDoc: any, triggerName: "route" | "remi
 
           summary.route_alerts = pushResult;
         }
-
       } else {
         summary.route_alerts = {
           sent: 0,
@@ -2137,24 +2395,30 @@ async function runScheduledSetting(settingDoc: any, triggerName: "route" | "remi
       }
     }
 
-const finishedAt = isoNow();
-    await logRef.set({
-      finished_at: finishedAt,
-      status: "completed",
-      summary,
-      error_message: null,
-      updated_at: finishedAt,
-    }, { merge: true });
-
-    await settingDoc.ref.set({
-      last_scheduled_run_at: finishedAt,
-      last_scheduled_result: {
+    const finishedAt = isoNow();
+    await logRef.set(
+      {
+        finished_at: finishedAt,
         status: "completed",
-        log_id: logRef.id,
         summary,
+        error_message: null,
+        updated_at: finishedAt,
       },
-      updated_at: finishedAt,
-    }, { merge: true });
+      { merge: true },
+    );
+
+    await settingDoc.ref.set(
+      {
+        last_scheduled_run_at: finishedAt,
+        last_scheduled_result: {
+          status: "completed",
+          log_id: logRef.id,
+          summary,
+        },
+        updated_at: finishedAt,
+      },
+      { merge: true },
+    );
 
     return {
       job_id: settingDoc.id,
@@ -2169,23 +2433,29 @@ const finishedAt = isoNow();
     const message = String(error?.message ?? error).slice(0, 800);
     const failedAt = isoNow();
 
-    await logRef.set({
-      finished_at: failedAt,
-      status: "failed",
-      summary,
-      error_message: message,
-      updated_at: failedAt,
-    }, { merge: true });
-
-    await settingDoc.ref.set({
-      last_scheduled_run_at: failedAt,
-      last_scheduled_result: {
+    await logRef.set(
+      {
+        finished_at: failedAt,
         status: "failed",
-        log_id: logRef.id,
+        summary,
         error_message: message,
+        updated_at: failedAt,
       },
-      updated_at: failedAt,
-    }, { merge: true });
+      { merge: true },
+    );
+
+    await settingDoc.ref.set(
+      {
+        last_scheduled_run_at: failedAt,
+        last_scheduled_result: {
+          status: "failed",
+          log_id: logRef.id,
+          error_message: message,
+        },
+        updated_at: failedAt,
+      },
+      { merge: true },
+    );
 
     return {
       job_id: settingDoc.id,
@@ -2228,18 +2498,19 @@ async function runScheduledFamilySettings(triggerName: "route" | "reminder" | "a
   return { total: results.length, completed, failed, skipped, results };
 }
 
-/* scheduledAfternoonRouteRunnerGoogleRoutesBound */ export const scheduledAfternoonRouteRunner = onSchedule(
-  {
-    schedule: "every 5 minutes",
-    timeZone: "Australia/Adelaide",
-    region: "us-central1",
-    maxInstances: 1,
-    secrets: [vapidPublicKey, vapidPrivateKey, vapidSubject, googleMapsApiKey],
-  },
-  async () => {
-    await runScheduledFamilySettings("route");
-  },
-);
+/* scheduledAfternoonRouteRunnerGoogleRoutesBound */ export const scheduledAfternoonRouteRunner =
+  onSchedule(
+    {
+      schedule: "every 5 minutes",
+      timeZone: "Australia/Adelaide",
+      region: "us-central1",
+      maxInstances: 1,
+      secrets: [vapidPublicKey, vapidPrivateKey, vapidSubject, googleMapsApiKey],
+    },
+    async () => {
+      await runScheduledFamilySettings("route");
+    },
+  );
 
 export const scheduledFamilyReminderRunner = onSchedule(
   {
@@ -2253,4 +2524,3 @@ export const scheduledFamilyReminderRunner = onSchedule(
     await runScheduledFamilySettings("reminder");
   },
 );
-

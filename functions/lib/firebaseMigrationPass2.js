@@ -25,15 +25,27 @@ async function assertFamilyMember(familyId, uid) {
     const direct = await db.doc(`families/${familyId}/members/${uid}`).get();
     if (direct.exists)
         return direct.data() ?? {};
-    const members = await db.collection(`families/${familyId}/members`).where("auth_user_id", "==", uid).limit(1).get();
+    const members = await db
+        .collection(`families/${familyId}/members`)
+        .where("auth_user_id", "==", uid)
+        .limit(1)
+        .get();
     if (members.empty)
         throw new HttpsError("permission-denied", "Not a family member.");
     return members.docs[0].data();
 }
-function isoNow() { return new Date().toISOString(); }
-function cleanFamilyId(value) { const familyId = String(value ?? "").trim(); if (!familyId)
-    throw new HttpsError("invalid-argument", "family_id is required."); return familyId; }
-function safeText(value, fallback = "") { return String(value ?? fallback).trim(); }
+function isoNow() {
+    return new Date().toISOString();
+}
+function cleanFamilyId(value) {
+    const familyId = String(value ?? "").trim();
+    if (!familyId)
+        throw new HttpsError("invalid-argument", "family_id is required.");
+    return familyId;
+}
+function safeText(value, fallback = "") {
+    return String(value ?? fallback).trim();
+}
 export const transcribeAudio = onCall({ region: "us-central1", secrets: [openAiApiKey] }, async (request) => {
     const uid = assertAuthed(request.auth?.uid);
     const apiKey = openAiApiKey.value();
@@ -46,7 +58,7 @@ export const transcribeAudio = onCall({ region: "us-central1", secrets: [openAiA
     if (!audioBase64) {
         throw new HttpsError("invalid-argument", "audio_base64 is required.");
     }
-    const cleaned = audioBase64.includes(",") ? audioBase64.split(",").pop() ?? "" : audioBase64;
+    const cleaned = audioBase64.includes(",") ? (audioBase64.split(",").pop() ?? "") : audioBase64;
     const audioBuffer = Buffer.from(cleaned, "base64");
     if (!audioBuffer.length) {
         throw new HttpsError("invalid-argument", "Audio payload is empty.");
@@ -55,15 +67,23 @@ export const transcribeAudio = onCall({ region: "us-central1", secrets: [openAiA
     if (audioBuffer.byteLength > maxBytes) {
         throw new HttpsError("invalid-argument", `Audio is too large for callable transcription. Keep recordings under ${Math.round(maxBytes / 1024 / 1024)} MB.`);
     }
-    const extensionFromMime = mimeType.includes("mp3") ? "mp3" :
-        mimeType.includes("mp4") ? "mp4" :
-            mimeType.includes("mpeg") ? "mpeg" :
-                mimeType.includes("mpga") ? "mpga" :
-                    mimeType.includes("m4a") ? "m4a" :
-                        mimeType.includes("wav") ? "wav" :
-                            mimeType.includes("ogg") ? "ogg" :
-                                mimeType.includes("oga") ? "oga" :
-                                    "webm";
+    const extensionFromMime = mimeType.includes("mp3")
+        ? "mp3"
+        : mimeType.includes("mp4")
+            ? "mp4"
+            : mimeType.includes("mpeg")
+                ? "mpeg"
+                : mimeType.includes("mpga")
+                    ? "mpga"
+                    : mimeType.includes("m4a")
+                        ? "m4a"
+                        : mimeType.includes("wav")
+                            ? "wav"
+                            : mimeType.includes("ogg")
+                                ? "ogg"
+                                : mimeType.includes("oga")
+                                    ? "oga"
+                                    : "webm";
     const safeFilename = originalFilename.includes(".")
         ? originalFilename.replace(/[^a-zA-Z0-9._-]/g, "-")
         : `family-dock-voice.${extensionFromMime}`;
@@ -184,9 +204,21 @@ export const generateProgressSummary = onCall({ region: "us-central1", secrets: 
         };
     }
     const [recordSnap, homeworkSnap, eventSnap] = await Promise.all([
-        db.collection(`families/${familyId}/learning_records`).where("child_id", "==", childId).limit(120).get(),
-        db.collection(`families/${familyId}/homework_tasks`).where("child_id", "==", childId).limit(150).get(),
-        db.collection(`families/${familyId}/events`).where("child_id", "==", childId).limit(160).get(),
+        db
+            .collection(`families/${familyId}/learning_records`)
+            .where("child_id", "==", childId)
+            .limit(120)
+            .get(),
+        db
+            .collection(`families/${familyId}/homework_tasks`)
+            .where("child_id", "==", childId)
+            .limit(150)
+            .get(),
+        db
+            .collection(`families/${familyId}/events`)
+            .where("child_id", "==", childId)
+            .limit(160)
+            .get(),
     ]);
     const records = recordSnap.docs
         .map(compactRecord)
@@ -292,17 +324,17 @@ Language target: ${language}.`;
     }
     function asList(value) {
         return Array.isArray(value)
-            ? value.map((item) => String(item ?? "").trim()).filter(Boolean).slice(0, 12)
+            ? value
+                .map((item) => String(item ?? "").trim())
+                .filter(Boolean)
+                .slice(0, 12)
             : [];
     }
     function asText(value, fallback) {
         const text = String(value ?? "").trim();
         return text || fallback;
     }
-    const evidenceBasedConfidence = evidenceCount >= 10 ? 0.82 :
-        evidenceCount >= 5 ? 0.7 :
-            evidenceCount >= 2 ? 0.55 :
-                0.35;
+    const evidenceBasedConfidence = evidenceCount >= 10 ? 0.82 : evidenceCount >= 5 ? 0.7 : evidenceCount >= 2 ? 0.55 : 0.35;
     const aiConfidence = Number(parsed?.confidence);
     const confidence = Math.max(0.1, Math.min(0.95, Number.isFinite(aiConfidence) ? aiConfidence : evidenceBasedConfidence));
     const title = asText(parsed?.title, subject ? `${subject} progress summary` : `${childName} progress summary`);
@@ -371,14 +403,34 @@ export const generateReportShareVersion = onCall({ region: "us-central1" }, asyn
     const summaryId = safeText(request.data?.summary_id);
     if (!summaryId)
         throw new HttpsError("invalid-argument", "summary_id is required.");
-    const summarySnap = await db.doc(`families/${familyId}/learning_progress_summaries/${summaryId}`).get();
+    const summarySnap = await db
+        .doc(`families/${familyId}/learning_progress_summaries/${summaryId}`)
+        .get();
     const summary = summarySnap.data() ?? {};
     const now = isoNow();
     const audience = safeText(request.data?.audience, "parent");
     const language = safeText(request.data?.language, "en");
     const title = `${safeText(summary.title, "Progress summary")} - ${audience}`;
     const content = `# ${title}\n\n${safeText(summary.executive_summary, "Draft summary.")}\n\n${safeText(summary.narrative_text, "")}`;
-    const share = { family_id: familyId, summary_id: summaryId, child_id: summary.child_id ?? null, created_by: uid, audience, language, title, content_markdown: content, email_subject: title, email_body: content, key_points: [], questions: [], action_items: [], privacy_notes: ["Review before sharing externally."], status: "draft", created_at: now, updated_at: now };
+    const share = {
+        family_id: familyId,
+        summary_id: summaryId,
+        child_id: summary.child_id ?? null,
+        created_by: uid,
+        audience,
+        language,
+        title,
+        content_markdown: content,
+        email_subject: title,
+        email_body: content,
+        key_points: [],
+        questions: [],
+        action_items: [],
+        privacy_notes: ["Review before sharing externally."],
+        status: "draft",
+        created_at: now,
+        updated_at: now,
+    };
     let id = `local-${Date.now()}`;
     if (request.data?.save !== false) {
         const ref = db.collection(`families/${familyId}/progress_report_shares`).doc();
@@ -442,7 +494,7 @@ function estimateTravelMinutes(args) {
     const distanceKm = haversineKm(fromLat, fromLng, toLat, toLng);
     const drivingMultiplier = 1.35;
     const averageKmh = 32;
-    const rawMinutes = Math.ceil((distanceKm * drivingMultiplier / averageKmh) * 60) + 5;
+    const rawMinutes = Math.ceil(((distanceKm * drivingMultiplier) / averageKmh) * 60) + 5;
     const travelMinutes = Math.max(8, Math.min(rawMinutes, 120));
     return {
         travel_minutes: travelMinutes,
@@ -560,12 +612,8 @@ async function buildDailyRouteDeparturePlansInternal(args) {
         oldLegsSnap.docs.forEach((docSnap) => batch.delete(docSnap.ref));
         const firstEvent = placeEvents[0];
         const lastEvent = placeEvents[placeEvents.length - 1];
-        const planRecommended = legs
-            .map((leg) => leg.recommended_departure_at)
-            .sort()[0] ?? null;
-        const planLatestSafe = legs
-            .map((leg) => leg.latest_safe_departure_at)
-            .sort()[0] ?? null;
+        const planRecommended = legs.map((leg) => leg.recommended_departure_at).sort()[0] ?? null;
+        const planLatestSafe = legs.map((leg) => leg.latest_safe_departure_at).sort()[0] ?? null;
         batch.set(planRef, {
             id: planId,
             family_id: args.familyId,
@@ -762,7 +810,9 @@ async function computeGoogleRouteForLeg(args) {
         static_duration_seconds: staticDurationSeconds,
         travel_minutes: Math.max(1, Math.ceil(durationSeconds / 60)),
         distance_meters: Number.isFinite(distanceMeters) ? distanceMeters : null,
-        distance_km_estimate: Number.isFinite(distanceMeters) ? Math.round((distanceMeters / 1000) * 10) / 10 : null,
+        distance_km_estimate: Number.isFinite(distanceMeters)
+            ? Math.round((distanceMeters / 1000) * 10) / 10
+            : null,
     };
 }
 async function refreshRouteLegTravelTimesInternal(args) {
@@ -828,10 +878,10 @@ async function refreshRouteLegTravelTimesInternal(args) {
             const targetStartAt = safeText(leg.target_start_at);
             const latestSafeDepartureAt = targetStartAt
                 ? minutesBeforeIso(targetStartAt, route.travel_minutes)
-                : leg.latest_safe_departure_at ?? null;
+                : (leg.latest_safe_departure_at ?? null);
             const recommendedDepartureAt = targetStartAt
                 ? minutesBeforeIso(targetStartAt, route.travel_minutes + bufferMinutes)
-                : leg.recommended_departure_at ?? null;
+                : (leg.recommended_departure_at ?? null);
             await legDoc.ref.set({
                 route_mode: "google_routes_traffic_aware",
                 travel_minutes: route.travel_minutes,
@@ -1025,7 +1075,9 @@ export const routeLateRiskCheck = onCall({ region: "us-central1" }, async (reque
                     minutes_to_recommended: minutesToRecommended,
                     minutes_to_latest_safe: minutesToLatestSafe,
                     message,
-                    recommendation: risk === "late" || risk === "high" ? "Leave now or adjust pickup plan." : "Get ready to leave soon.",
+                    recommendation: risk === "late" || risk === "high"
+                        ? "Leave now or adjust pickup plan."
+                        : "Get ready to leave soon.",
                     status: "active",
                     created_at: nowIsoValue,
                 };
@@ -1059,13 +1111,13 @@ export const routeLateRiskCheck = onCall({ region: "us-central1" }, async (reque
             })
             : worstRisk;
         const planMessage = legsSnap.empty
-            ? (planRisk === "late"
+            ? planRisk === "late"
                 ? "This route plan appears late."
                 : planRisk === "high"
                     ? "This route plan should depart now."
                     : planRisk === "medium"
                         ? "This route plan should prepare to depart soon."
-                        : "Route timing looks OK.")
+                        : "Route timing looks OK."
             : worstMessage;
         await planDoc.ref.set({
             late_risk_level: planRisk,
@@ -1141,7 +1193,11 @@ async function sendPushToFamily(args) {
         const subscription = asWebPushSubscription(row);
         if (!subscription) {
             skipped += 1;
-            results.push({ subscription_id: docSnap.id, status: "skipped", error: "Missing endpoint or keys." });
+            results.push({
+                subscription_id: docSnap.id,
+                status: "skipped",
+                error: "Missing endpoint or keys.",
+            });
             continue;
         }
         const logRef = db.collection(`families/${args.familyId}/notification_logs`).doc();
@@ -1214,7 +1270,11 @@ async function sendPushToFamily(args) {
                 created_at: now,
                 updated_at: now,
             });
-            results.push({ subscription_id: docSnap.id, status: "failed", error: messageText.slice(0, 200) });
+            results.push({
+                subscription_id: docSnap.id,
+                status: "failed",
+                error: messageText.slice(0, 200),
+            });
         }
     }
     return {
@@ -1255,14 +1315,41 @@ export const savePushSubscription = onCall({ region: "us-central1" }, async (req
     const endpoint = safeText(request.data?.endpoint);
     if (!endpoint)
         throw new HttpsError("invalid-argument", "endpoint is required.");
-    const existing = await db.collection(`families/${familyId}/push_subscriptions`).where("endpoint", "==", endpoint).limit(1).get();
-    const ref = existing.empty ? db.collection(`families/${familyId}/push_subscriptions`).doc() : existing.docs[0].ref;
+    const existing = await db
+        .collection(`families/${familyId}/push_subscriptions`)
+        .where("endpoint", "==", endpoint)
+        .limit(1)
+        .get();
+    const ref = existing.empty
+        ? db.collection(`families/${familyId}/push_subscriptions`).doc()
+        : existing.docs[0].ref;
     const now = isoNow();
     if (request.data?.action === "deactivate") {
-        await ref.set({ id: ref.id, family_id: familyId, auth_user_id: uid, endpoint, is_active: false, disabled_at: now, updated_at: now }, { merge: true });
+        await ref.set({
+            id: ref.id,
+            family_id: familyId,
+            auth_user_id: uid,
+            endpoint,
+            is_active: false,
+            disabled_at: now,
+            updated_at: now,
+        }, { merge: true });
         return { ok: true, active: false, id: ref.id };
     }
-    await ref.set({ id: ref.id, family_id: familyId, auth_user_id: uid, member_id: request.data?.member_id ?? null, endpoint, keys: request.data?.keys ?? {}, user_agent: request.data?.user_agent ?? null, device_label: request.data?.device_label ?? null, is_active: true, last_seen_at: now, created_at: now, updated_at: now }, { merge: true });
+    await ref.set({
+        id: ref.id,
+        family_id: familyId,
+        auth_user_id: uid,
+        member_id: request.data?.member_id ?? null,
+        endpoint,
+        keys: request.data?.keys ?? {},
+        user_agent: request.data?.user_agent ?? null,
+        device_label: request.data?.device_label ?? null,
+        is_active: true,
+        last_seen_at: now,
+        created_at: now,
+        updated_at: now,
+    }, { merge: true });
     return { ok: true, active: true, id: ref.id };
 });
 function reminderMinutesUntil(value) {
@@ -1507,13 +1594,27 @@ export const systemHealthCheck = onCall({ region: "us-central1" }, async (reques
     const uid = assertAuthed(request.auth?.uid);
     const familyId = cleanFamilyId(request.data?.family_id);
     await assertFamilyMember(familyId, uid);
-    const tables = ["members", "places", "events", "route_stops", "homework_tasks", "payments", "requests"];
+    const tables = [
+        "members",
+        "places",
+        "events",
+        "route_stops",
+        "homework_tasks",
+        "payments",
+        "requests",
+    ];
     const result = [];
     for (const table of tables) {
         const snap = await db.collection(`families/${familyId}/${table}`).limit(1).get();
         result.push({ ok: true, table, count: snap.size, error: null });
     }
-    return { ok: true, checked_at: isoNow(), env: { FIREBASE_PROJECT_ID: Boolean(process.env.GCLOUD_PROJECT) }, tables: result, problem_counts: {} };
+    return {
+        ok: true,
+        checked_at: isoNow(),
+        env: { FIREBASE_PROJECT_ID: Boolean(process.env.GCLOUD_PROJECT) },
+        tables: result,
+        problem_counts: {},
+    };
 });
 export const scheduledFamilyRunner = onCall({ region: "us-central1" }, async (request) => {
     const uid = assertAuthed(request.auth?.uid);
@@ -1521,7 +1622,18 @@ export const scheduledFamilyRunner = onCall({ region: "us-central1" }, async (re
     await assertFamilyMember(familyId, uid);
     const now = isoNow();
     const ref = db.collection(`families/${familyId}/scheduled_runner_logs`).doc();
-    await ref.set({ id: ref.id, runner_name: "scheduledFamilyRunner", run_mode: safeText(request.data?.mode, "manual"), family_id: familyId, started_at: now, finished_at: now, status: "completed", summary: { ok: true }, error_message: null, created_at: now });
+    await ref.set({
+        id: ref.id,
+        runner_name: "scheduledFamilyRunner",
+        run_mode: safeText(request.data?.mode, "manual"),
+        family_id: familyId,
+        started_at: now,
+        finished_at: now,
+        status: "completed",
+        summary: { ok: true },
+        error_message: null,
+        created_at: now,
+    });
     return { ok: true, log_id: ref.id };
 });
 function getFamilyIdFromScheduledSetting(settingDoc, setting) {
@@ -1579,9 +1691,22 @@ async function runScheduledLateRiskScan(familyId) {
     const now = new Date();
     const baseMs = now.getTime();
     const nowIsoValue = now.toISOString();
-    const routeBuildResult = await buildDailyRouteDeparturePlansInternal({ familyId, date: adelaideDateString(now), createdBy: "system-scheduler", defaultTravelMinutes: 25, bufferMinutes: 10, alertMinutesBefore: 15 });
-    const routeRefreshResult = await refreshRouteLegTravelTimesInternal({ familyId, date: adelaideDateString(now), limit: 80, allowMissingApiKey: true });
-    const planSnap = await db.collection(`families/${familyId}/route_departure_plans`)
+    const routeBuildResult = await buildDailyRouteDeparturePlansInternal({
+        familyId,
+        date: adelaideDateString(now),
+        createdBy: "system-scheduler",
+        defaultTravelMinutes: 25,
+        bufferMinutes: 10,
+        alertMinutesBefore: 15,
+    });
+    const routeRefreshResult = await refreshRouteLegTravelTimesInternal({
+        familyId,
+        date: adelaideDateString(now),
+        limit: 80,
+        allowMissingApiKey: true,
+    });
+    const planSnap = await db
+        .collection(`families/${familyId}/route_departure_plans`)
         .where("status", "==", "active")
         .limit(80)
         .get();
@@ -1646,7 +1771,9 @@ async function runScheduledLateRiskScan(familyId) {
                     minutes_to_recommended: minutesToRecommended,
                     minutes_to_latest_safe: minutesToLatestSafe,
                     message,
-                    recommendation: risk === "late" || risk === "high" ? "Leave now or adjust pickup plan." : "Get ready to leave soon.",
+                    recommendation: risk === "late" || risk === "high"
+                        ? "Leave now or adjust pickup plan."
+                        : "Get ready to leave soon.",
                     status: "active",
                     created_at: nowIsoValue,
                 };

@@ -12,7 +12,12 @@
     "firebase:deploy": "npm run build && npm --prefix functions run build && firebase deploy",
     "firebase:deploy:hosting": "npm run build && firebase deploy --only hosting",
     "firebase:deploy:functions": "npm --prefix functions run build && firebase deploy --only functions",
-    "firebase:deploy:rules": "firebase deploy --only firestore:rules,storage"
+    "firebase:deploy:rules": "firebase deploy --only firestore:rules,storage",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "format:functions": "prettier --write \"functions/src/**/*.ts\" \"functions/*.json\"",
+    "check:functions:exports": "node scripts/check-functions-exports.cjs",
+    "verify:functions": "npm --prefix functions run build && npm run check:functions:exports"
   },
   "dependencies": {
     "firebase": "^12.6.0",
@@ -32,6 +37,7 @@
     "globals": "^17.6.0",
     "typescript": "~6.0.2",
     "typescript-eslint": "^8.59.2",
-    "vite": "^8.0.12"
+    "vite": "^8.0.12",
+    "prettier": "^3.6.2"
   }
 }

@@ -23,7 +23,9 @@ function isoNow() {
     return new Date().toISOString();
 }
 function normalizeActionType(value) {
-    const raw = String(value ?? "").trim().toLowerCase();
+    const raw = String(value ?? "")
+        .trim()
+        .toLowerCase();
     if (["location", "locations", "place_location", "new_location"].includes(raw))
         return "place";
     if (["calendar", "event", "schedule"].includes(raw))
@@ -66,7 +68,9 @@ function normalizeActions(raw) {
         actions = [raw.action];
     else if (raw?.type || raw?.action_type || raw?.kind)
         actions = [raw];
-    return actions.map(normalizeOneAction).filter((action) => action && typeof action === "object" && action.type);
+    return actions
+        .map(normalizeOneAction)
+        .filter((action) => action && typeof action === "object" && action.type);
 }
 function cleanAiText(value) {
     return value
@@ -101,7 +105,10 @@ function parseLocalFallbackAction(transcript, uid) {
         for (const keyword of keywords) {
             const index = lower.indexOf(keyword.toLowerCase());
             if (index >= 0) {
-                const raw = text.slice(index + keyword.length).replace(/^[:：,\s]+/, "").trim();
+                const raw = text
+                    .slice(index + keyword.length)
+                    .replace(/^[:：,\s]+/, "")
+                    .trim();
                 if (raw)
                     return cleanAiText(raw.split(/[。；;\n]/)[0] ?? raw);
             }
@@ -237,13 +244,19 @@ export const parseAiCommand = onCall({ secrets: [openAiApiKey], region: "us-cent
     const actionMissingFields = normalizedActions.flatMap((action) => Array.isArray(action.missing_fields) ? action.missing_fields : []);
     const missingFields = actionMissingFields.length > 0
         ? Array.from(new Set(actionMissingFields))
-        : Array.isArray(parsed.missing_fields) ? parsed.missing_fields : [];
+        : Array.isArray(parsed.missing_fields)
+            ? parsed.missing_fields
+            : [];
     const normalized = {
         intent: parsed.intent ?? "family_update",
         confidence: Number(parsed.confidence ?? 0.6),
         language: parsed.language ?? "auto",
-        needs_clarification: normalizedActions.length > 0 ? missingFields.length > 0 : Boolean(parsed.needs_clarification ?? false),
-        clarifying_question: normalizedActions.length > 0 && missingFields.length === 0 ? null : parsed.clarifying_question ?? null,
+        needs_clarification: normalizedActions.length > 0
+            ? missingFields.length > 0
+            : Boolean(parsed.needs_clarification ?? false),
+        clarifying_question: normalizedActions.length > 0 && missingFields.length === 0
+            ? null
+            : (parsed.clarifying_question ?? null),
         missing_fields: missingFields,
         draft_summary: parsed.draft_summary ?? transcript,
         actions: normalizedActions,
@@ -378,7 +391,13 @@ export const commitAiActions = onCall({ region: "us-central1" }, async (request)
             created_at: createdAt,
             updated_at: createdAt,
         });
-        committed.push({ client_action_id: action.client_action_id ?? null, type, table: collectionName, id: ref.id, action_log_id: "" });
+        committed.push({
+            client_action_id: action.client_action_id ?? null,
+            type,
+            table: collectionName,
+            id: ref.id,
+            action_log_id: "",
+        });
         if (type === "homework_task") {
             const items = Array.isArray(action.items) && action.items.length > 0
                 ? action.items
@@ -416,11 +435,15 @@ export const createMemberLogin = onCall({ region: "us-central1" }, async (reques
     const familyId = String(request.data?.familyId ?? request.data?.family_id ?? "");
     const existingMemberId = request.data?.memberId ? String(request.data.memberId) : null;
     const displayName = String(request.data?.displayName ?? request.data?.display_name ?? "").trim();
-    const email = String(request.data?.email ?? "").trim().toLowerCase();
+    const email = String(request.data?.email ?? "")
+        .trim()
+        .toLowerCase();
     const password = String(request.data?.password ?? "");
     const role = String(request.data?.role ?? "child");
     const color = request.data?.color ? String(request.data.color) : null;
-    const defaultNavigationApp = request.data?.defaultNavigationApp ? String(request.data.defaultNavigationApp) : "google";
+    const defaultNavigationApp = request.data?.defaultNavigationApp
+        ? String(request.data.defaultNavigationApp)
+        : "google";
     if (!familyId)
         throw new HttpsError("invalid-argument", "familyId is required.");
     if (!displayName)
@@ -474,5 +497,5 @@ export const createMemberLogin = onCall({ region: "us-central1" }, async (reques
     await batch.commit();
     return { ok: true, uid: userRecord.uid, member_id: userRecord.uid };
 });
-export { adminMemberAccountAction, createMemberInvite, bulkMemberInvites, selfRegisterMember, createFamilyAccount, geocodeFamilyPlaces, summarizeLearning, undoFamilyAction } from './firebaseMigrationAdditions.js';
-export { transcribeAudio, generateProgressSummary, generateReportShareVersion, routeLateRiskCheck, routeDepartureAlerts, savePushSubscription, sendFamilyReminders, systemHealthCheck, scheduledFamilyRunner, scheduledAfternoonRouteRunner, scheduledFamilyReminderRunner, buildDailyRouteDeparturePlans, refreshRouteLegTravelTimes } from './firebaseMigrationPass2.js';
+export { adminMemberAccountAction, createMemberInvite, bulkMemberInvites, selfRegisterMember, createFamilyAccount, geocodeFamilyPlaces, summarizeLearning, undoFamilyAction, } from "./firebaseMigrationAdditions.js";
+export { transcribeAudio, generateProgressSummary, generateReportShareVersion, routeLateRiskCheck, routeDepartureAlerts, savePushSubscription, sendFamilyReminders, systemHealthCheck, scheduledFamilyRunner, scheduledAfternoonRouteRunner, scheduledFamilyReminderRunner, buildDailyRouteDeparturePlans, refreshRouteLegTravelTimes, } from "./firebaseMigrationPass2.js";
